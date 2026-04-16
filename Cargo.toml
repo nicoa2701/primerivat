@@ -1,0 +1,19 @@
+[package]
+name = "rivat3"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "primerivat"
+path = "src/main.rs"
+
+[dependencies]
+rayon = "1"
+cache-size = "0.7"
+num_cpus = "1.16"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
