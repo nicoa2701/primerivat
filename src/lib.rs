@@ -1,5 +1,4 @@
 pub mod baseline;
-pub mod bit;
 pub mod dr;
 pub mod math;
 pub mod parameters;

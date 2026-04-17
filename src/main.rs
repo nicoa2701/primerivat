@@ -135,16 +135,8 @@ fn mode_reference_x(mode: &Mode) -> Option<u128> {
     match mode {
         Mode::Normal { x, .. }
         | Mode::Profile { x }
-        | Mode::DrProfile { x }
-        | Mode::DrMeisselProfile { x }
-        | Mode::DrMeissel2Profile { x }
-        | Mode::DrMeissel3Profile { x }
         | Mode::DrMeissel4Profile { x }
-        | Mode::DrV3Profile { x }
-        | Mode::DrV4Profile { x }
-        | Mode::LucyProfile { x }
-        | Mode::PhiBackendProfile { x }
-        | Mode::DrPhiBackendProfile { x } => Some(*x),
+        | Mode::LucyProfile { x } => Some(*x),
         Mode::Sweep { x_max } => Some(*x_max),
         Mode::NtBatch { jobs } => jobs.iter().map(|j| j.x).max(),
         _ => None,
@@ -182,6 +174,7 @@ fn fmt_delta_u128(current: u128, experimental: u128) -> String {
     }
 }
 
+#[allow(dead_code)]
 fn pct(part: std::time::Duration, total: std::time::Duration) -> f64 {
     if total.is_zero() {
         0.0
@@ -224,18 +217,8 @@ enum Mode {
     Normal { label: String, x: u128 },
     NtBatch { jobs: Vec<NtBatchJob> },
     Profile { x: u128 },
-    DrProfile { x: u128 },
-    DrMeisselProfile { x: u128 },
-    DrMeissel2Profile { x: u128 },
-    DrMeissel3Profile { x: u128 },
     DrMeissel4Profile { x: u128 },
-    DrV3Profile { x: u128 },
-    DrV4Profile { x: u128 },
     LucyProfile { x: u128 },
-    DrVsBaselineGrid,
-    PhiBackendGrid,
-    PhiBackendProfile { x: u128 },
-    DrPhiBackendProfile { x: u128 },
     Sweep { x_max: u128 },
     CandidateGrid,
     CandidateSearch,
@@ -468,72 +451,16 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
                 mode = Some(Mode::Profile { x });
                 i += if take_value.is_some() { 2 } else { 1 };
             }
-            "--dr-profile" => {
-                let take_value = args.get(i + 1).filter(|s| !s.starts_with('-'));
-                let x = parse_x(take_value.map(|s| s.as_str()).unwrap_or("1000000000000"))?;
-                mode = Some(Mode::DrProfile { x });
-                i += if take_value.is_some() { 2 } else { 1 };
-            }
             "--lucy-profile" => {
                 let take_value = args.get(i + 1).filter(|s| !s.starts_with('-'));
                 let x = parse_x(take_value.map(|s| s.as_str()).unwrap_or("1000000000000"))?;
                 mode = Some(Mode::LucyProfile { x });
                 i += if take_value.is_some() { 2 } else { 1 };
             }
-            "--dr-meissel" => {
-                let take_value = args.get(i + 1).filter(|s| !s.starts_with('-'));
-                let x = parse_x(take_value.map(|s| s.as_str()).unwrap_or("1000000000000"))?;
-                mode = Some(Mode::DrMeisselProfile { x });
-                i += if take_value.is_some() { 2 } else { 1 };
-            }
-            "--dr-meissel2" => {
-                let take_value = args.get(i + 1).filter(|s| !s.starts_with('-'));
-                let x = parse_x(take_value.map(|s| s.as_str()).unwrap_or("1000000000000"))?;
-                mode = Some(Mode::DrMeissel2Profile { x });
-                i += if take_value.is_some() { 2 } else { 1 };
-            }
-            "--dr-meissel3" => {
-                let take_value = args.get(i + 1).filter(|s| !s.starts_with('-'));
-                let x = parse_x(take_value.map(|s| s.as_str()).unwrap_or("1000000000000"))?;
-                mode = Some(Mode::DrMeissel3Profile { x });
-                i += if take_value.is_some() { 2 } else { 1 };
-            }
-            "--dr-meissel4" => {
+            "--dr-meissel4" | "--dr-profile" => {
                 let take_value = args.get(i + 1).filter(|s| !s.starts_with('-'));
                 let x = parse_x(take_value.map(|s| s.as_str()).unwrap_or("1000000000000"))?;
                 mode = Some(Mode::DrMeissel4Profile { x });
-                i += if take_value.is_some() { 2 } else { 1 };
-            }
-            "--dr-v3" => {
-                let take_value = args.get(i + 1).filter(|s| !s.starts_with('-'));
-                let x = parse_x(take_value.map(|s| s.as_str()).unwrap_or("1000000000000"))?;
-                mode = Some(Mode::DrV3Profile { x });
-                i += if take_value.is_some() { 2 } else { 1 };
-            }
-            "--dr-v4" => {
-                let take_value = args.get(i + 1).filter(|s| !s.starts_with('-'));
-                let x = parse_x(take_value.map(|s| s.as_str()).unwrap_or("1000000000000"))?;
-                mode = Some(Mode::DrV4Profile { x });
-                i += if take_value.is_some() { 2 } else { 1 };
-            }
-            "--dr-vs-baseline-grid" => {
-                mode = Some(Mode::DrVsBaselineGrid);
-                i += 1;
-            }
-            "--phi-backend-grid" => {
-                mode = Some(Mode::PhiBackendGrid);
-                i += 1;
-            }
-            "--phi-backend-profile" => {
-                let take_value = args.get(i + 1).filter(|s| !s.starts_with('-'));
-                let x = parse_x(take_value.map(|s| s.as_str()).unwrap_or("1000000000000"))?;
-                mode = Some(Mode::PhiBackendProfile { x });
-                i += if take_value.is_some() { 2 } else { 1 };
-            }
-            "--dr-phi-backend-profile" => {
-                let take_value = args.get(i + 1).filter(|s| !s.starts_with('-'));
-                let x = parse_x(take_value.map(|s| s.as_str()).unwrap_or("1000000000000"))?;
-                mode = Some(Mode::DrPhiBackendProfile { x });
                 i += if take_value.is_some() { 2 } else { 1 };
             }
             "--sweep" => {
@@ -1349,270 +1276,6 @@ fn run_profile(
 }
 
 #[allow(non_snake_case)]
-fn run_dr_profile(x: u128) {
-    println!(
-        "── DR Profile  x = {} ─────────────────────────────────────────",
-        fmt_thousands(x)
-    );
-    let runtime = dr::profile_prime_pi_dr(x);
-    let (v2_result, v2_times) = dr::prime_pi_dr_v2_timed(x);
-    let v2_time: std::time::Duration = v2_times.iter().sum();
-
-    println!(
-        "  φ(x,a) / Lucy          {:>10}  ({:.1}%)",
-        fmt_elapsed(runtime.phi_time),
-        pct(runtime.phi_time, runtime.total_time)
-    );
-    println!(
-        "  seed primes ≤ ∛x       {:>10}  ({:.1}%)",
-        fmt_elapsed(runtime.seed_primes_time),
-        pct(runtime.seed_primes_time, runtime.total_time)
-    );
-    println!(
-        "  primes up to √x        {:>10}  ({:.1}%)",
-        fmt_elapsed(runtime.sqrt_primes_time),
-        pct(runtime.sqrt_primes_time, runtime.total_time)
-    );
-    println!(
-        "  S2 BIT sweep           {:>10}  ({:.1}%)",
-        fmt_elapsed(runtime.s2_time),
-        pct(runtime.s2_time, runtime.total_time)
-    );
-    println!("  ─────────────────────────────────────────");
-    println!(
-        "  DR v1 Total (Lucy+BIT)  {:>10}    π({}) = {}  {}",
-        fmt_elapsed(runtime.total_time),
-        fmt_thousands(x),
-        fmt_thousands(runtime.result),
-        if runtime.result == baseline::prime_pi(x) {
-            "✓"
-        } else {
-            "✗ WRONG"
-        }
-    );
-    println!(
-        "  DR v2 Total (Lucy+pcnt) {:>10}    {}",
-        fmt_elapsed(v2_time),
-        if v2_result == runtime.result { "✓" } else { "✗ WRONG" }
-    );
-    let v2_labels = ["    Lucy early-stop", "    primes_up_to   ", "    s2_popcount    "];
-    for (lbl, &t) in v2_labels.iter().zip(v2_times.iter()) {
-        if t > std::time::Duration::ZERO {
-            println!("  {} {:>10}", lbl, fmt_elapsed(t));
-        }
-    }
-    println!(
-        "  a = {}  phi(x,a) = {}",
-        fmt_thousands(runtime.a as u128),
-        fmt_thousands(runtime.phi_x_a)
-    );
-}
-
-fn run_dr_meissel_profile(x: u128, threads: usize) {
-    use std::time::Instant;
-    println!(
-        "── DR Meissel Profile  x = {} ─────────────────────────────────────────",
-        fmt_thousands(x)
-    );
-
-    // Baseline for comparison
-    let t = Instant::now();
-    let baseline_result = baseline::prime_pi_with_threads(x, threads);
-    let baseline_time = t.elapsed();
-
-    // DR v1: Lucy + BIT S2
-    let runtime = dr::profile_prime_pi_dr(x);
-
-    // DR v2: Lucy + popcount S2
-    let t = Instant::now();
-    let v2_result = dr::prime_pi_dr_v2(x);
-    let v2_time = t.elapsed();
-
-    // Meissel DR with per-step timing
-    let (meissel_result, step_times) = dr::prime_pi_dr_meissel_timed(x);
-    let meissel_time: std::time::Duration = step_times.iter().sum();
-
-    let ratio_vs_base = |t: std::time::Duration| t.as_secs_f64() / baseline_time.as_secs_f64();
-
-    struct SummaryRow<'a> {
-        label: &'a str,
-        time: std::time::Duration,
-        ratio: f64,
-        ok: bool,
-    }
-
-    let mut rows = vec![
-        SummaryRow {
-            label: "Baseline  (Lucy+table)",
-            time: baseline_time,
-            ratio: 1.0,
-            ok: true,
-        },
-        SummaryRow {
-            label: "DR v1     (Lucy+BIT)",
-            time: runtime.total_time,
-            ratio: ratio_vs_base(runtime.total_time),
-            ok: runtime.result == baseline_result,
-        },
-        SummaryRow {
-            label: "DR v2     (Lucy+pcnt)",
-            time: v2_time,
-            ratio: ratio_vs_base(v2_time),
-            ok: v2_result == baseline_result,
-        },
-        SummaryRow {
-            label: "DR Meissel",
-            time: meissel_time,
-            ratio: ratio_vs_base(meissel_time),
-            ok: meissel_result == baseline_result,
-        },
-    ];
-    rows.sort_unstable_by_key(|row| row.time);
-
-    println!("  Final summary (sorted by runtime):");
-    for row in rows {
-        println!(
-            "  {:<24} {:>10}  ratio {:>.3}×  {}",
-            row.label,
-            fmt_elapsed(row.time),
-            row.ratio,
-            if row.ok { "✓" } else { "✗ WRONG" }
-        );
-    }
-    println!("  Meissel step breakdown:");
-    let labels = [
-        "  sieve+primes",
-        "  collect_phi ",
-        "  BIT sweep   ",
-        "  phi()       ",
-    ];
-    for (i, (&t, &lbl)) in step_times[..4].iter().zip(labels.iter()).enumerate() {
-        println!("    step{} ({lbl})  {}", i + 1, fmt_elapsed(t));
-    }
-}
-
-fn run_dr_meissel2_profile(x: u128, threads: usize) {
-    use std::time::Instant;
-    println!(
-        "── DR Meissel v2 (PhiCache)  x = {} ───────────────────────────────────────",
-        fmt_thousands(x)
-    );
-
-    // Baseline
-    let t = Instant::now();
-    let baseline_result = baseline::prime_pi_with_threads(x, threads);
-    let baseline_time = t.elapsed();
-
-    // DR v2 : référence rapide actuelle
-    let t = Instant::now();
-    let v2_result = dr::prime_pi_dr_v2(x);
-    let v2_time = t.elapsed();
-
-    // Meissel v1 : avec phi_table + memo HashMap (53M entrées)
-    let (m1_result, m1_times) = dr::prime_pi_dr_meissel_timed(x);
-    let m1_time: std::time::Duration = m1_times.iter().sum();
-
-    // Meissel v2 : avec PhiCache + memo réduit
-    let (m2_result, m2_times) = dr::prime_pi_dr_meissel_v2_timed(x);
-    let m2_time: std::time::Duration = m2_times.iter().sum();
-
-    let ratio = |t: std::time::Duration| t.as_secs_f64() / baseline_time.as_secs_f64();
-
-    struct Row<'a> {
-        label: &'a str,
-        time: std::time::Duration,
-        ratio: f64,
-        ok: bool,
-    }
-    let rows = [
-        Row { label: "Baseline  (Lucy+table)", time: baseline_time, ratio: 1.0, ok: true },
-        Row { label: "DR v2     (Lucy+pcnt) ", time: v2_time,       ratio: ratio(v2_time), ok: v2_result == baseline_result },
-        Row { label: "Meissel v1 (phi_table)", time: m1_time,       ratio: ratio(m1_time), ok: m1_result == baseline_result },
-        Row { label: "Meissel v2 (PhiCache) ", time: m2_time,       ratio: ratio(m2_time), ok: m2_result == baseline_result },
-    ];
-    for row in &rows {
-        println!(
-            "  {:<26} {:>10}  {:>6.3}×  {}",
-            row.label,
-            fmt_elapsed(row.time),
-            row.ratio,
-            if row.ok { "✓" } else { "✗ WRONG" }
-        );
-    }
-    println!("  Meissel v2 step breakdown:");
-    let labels = ["sieve+cache   ", "collect_phi   ", "BIT sweep     ", "phi_cached()  "];
-    for (i, (&t, &lbl)) in m2_times[..4].iter().zip(labels.iter()).enumerate() {
-        println!("    step{} ({lbl})  {}", i + 1, fmt_elapsed(t));
-    }
-}
-
-fn run_dr_meissel3_profile(x: u128, threads: usize) {
-    use std::time::Instant;
-    println!(
-        "── DR Meissel v3 (PiTable + phi_loop)  x = {} ─────────────────────────────",
-        fmt_thousands(x)
-    );
-
-    // Baseline
-    let t = Instant::now();
-    let baseline_result = baseline::prime_pi_with_threads(x, threads);
-    let baseline_time = t.elapsed();
-
-    // DR v2 : référence rapide actuelle
-    let t = Instant::now();
-    let v2_result = dr::prime_pi_dr_v2(x);
-    let v2_time = t.elapsed();
-
-    // Meissel v2 : PhiCache + mémo (référence) — HashMap mémo ~200 M entrées à x=1e14 → OOM.
-    // On limite à x ≤ 1e13 pour éviter l'allocation de plusieurs Go.
-    const MEISSEL_V2_LIMIT: u128 = 10_000_000_000_000; // 1e13
-    let (m2_result, m2_time) = if x <= MEISSEL_V2_LIMIT {
-        let t = Instant::now();
-        let r = dr::prime_pi_dr_meissel_v2(x);
-        (Some(r), t.elapsed())
-    } else {
-        (None, std::time::Duration::ZERO)
-    };
-
-    // Meissel v3 : PiTable + phi_loop sans mémo
-    let (m3_result, m3_times) = dr::prime_pi_dr_meissel_v3_timed(x);
-    let m3_time: std::time::Duration = m3_times[..4].iter().sum();
-
-    let ratio = |t: std::time::Duration| t.as_secs_f64() / baseline_time.as_secs_f64();
-
-    struct Row<'a> {
-        label: &'a str,
-        time: std::time::Duration,
-        ratio: f64,
-        ok: bool,
-        skip: bool,
-    }
-    let rows = [
-        Row { label: "Baseline  (Lucy+table)", time: baseline_time, ratio: 1.0,           ok: true,                              skip: false },
-        Row { label: "DR v2     (Lucy+pcnt) ", time: v2_time,       ratio: ratio(v2_time), ok: v2_result == baseline_result,       skip: false },
-        Row { label: "Meissel v2 (PhiCache) ", time: m2_time,       ratio: ratio(m2_time), ok: m2_result.map_or(true, |r| r == baseline_result), skip: m2_result.is_none() },
-        Row { label: "Meissel v3 (PiTable)  ", time: m3_time,       ratio: ratio(m3_time), ok: m3_result == baseline_result,       skip: false },
-    ];
-    for row in &rows {
-        if row.skip {
-            println!("  {:<26} {:>10}  {:>6}   (skipped — x > 1e13)", row.label, "--", "--");
-            continue;
-        }
-        println!(
-            "  {:<26} {:>10}  {:>6.3}×  {}",
-            row.label,
-            fmt_elapsed(row.time),
-            row.ratio,
-            if row.ok { "✓" } else { "✗ WRONG" }
-        );
-    }
-    println!("  Meissel v3 step breakdown:");
-    let labels = ["sieve         ", "PiTable+Cache ", "BIT sweep S₂  ", "phi_loop()    "];
-    for (i, (&t, &lbl)) in m3_times[..4].iter().zip(labels.iter()).enumerate() {
-        println!("    step{} ({lbl})  {}", i + 1, fmt_elapsed(t));
-    }
-}
-
 fn run_dr_meissel4_profile(x: u128, _threads: usize) {
     println!(
         "── DR Meissel v4  x = {} ────────────────────────────────────────────────────",
@@ -1628,140 +1291,6 @@ fn run_dr_meissel4_profile(x: u128, _threads: usize) {
     }
     println!("  total              {}", fmt_elapsed(total));
     println!("  π({}) = {}", fmt_thousands(x), fmt_thousands(result));
-}
-
-fn run_dr_v3_profile(x: u128) {
-    use std::time::Instant;
-    println!(
-        "── DR v3 Profile  x = {} ──────────────────────────────────────────────────",
-        fmt_thousands(x)
-    );
-
-    let t = Instant::now();
-    let v2_result = dr::prime_pi_dr_v2(x);
-    let v2_time = t.elapsed();
-
-    let (v3_result, step_times) = dr::prime_pi_dr_v3_timed(x);
-    let v3_time: std::time::Duration = step_times[..3].iter().sum();
-
-    let ok_v2 = v2_result == v2_result; // always true — just for symmetry
-    let ok_v3 = v3_result == v2_result;
-
-    println!(
-        "  v2 (Lucy+popcount)          {}  {}",
-        fmt_elapsed(v2_time),
-        if ok_v2 { "✓" } else { "✗" }
-    );
-    println!(
-        "  v3 (dense medium_pi)        {}  {}  [{:.2}×]",
-        fmt_elapsed(v3_time),
-        if ok_v3 { "✓" } else { "✗" },
-        v2_time.as_secs_f64() / v3_time.as_secs_f64().max(1e-9)
-    );
-    println!(
-        "    step1 (sieve+phi_table)   {}",
-        fmt_elapsed(step_times[0])
-    );
-    println!(
-        "    step2 (s2+medium_pi sweep) {}",
-        fmt_elapsed(step_times[1])
-    );
-    println!(
-        "    step3 (phi recursion)      {}",
-        fmt_elapsed(step_times[2])
-    );
-    println!("  π({}) = {}", fmt_thousands(x), fmt_thousands(v3_result));
-}
-
-fn run_dr_v4_profile(x: u128) {
-    use std::time::Instant;
-    println!(
-        "── DR v4 Profile  x = {} ──────────────────────────────────────────────────",
-        fmt_thousands(x)
-    );
-
-    let t = Instant::now();
-    let v2_result = dr::prime_pi_dr_v2(x);
-    let v2_time = t.elapsed();
-
-    let (v4_result, step_times) = dr::prime_pi_dr_v4_timed(x);
-    let v4_time: std::time::Duration = step_times[..4].iter().sum();
-
-    let ok_v4 = v4_result == v2_result;
-
-    println!(
-        "  v2 (Lucy+popcount)          {}  ✓",
-        fmt_elapsed(v2_time),
-    );
-    println!(
-        "  v4 (flat memo+popcount)     {}  {}  [{:.2}×]",
-        fmt_elapsed(v4_time),
-        if ok_v4 { "✓" } else { "✗" },
-        v2_time.as_secs_f64() / v4_time.as_secs_f64().max(1e-9)
-    );
-    println!(
-        "    step1 (sieve+phi_table)   {}",
-        fmt_elapsed(step_times[0])
-    );
-    println!(
-        "    step2 (collect queries)   {}",
-        fmt_elapsed(step_times[1])
-    );
-    println!(
-        "    step3 (S2+large_pi par)   {}",
-        fmt_elapsed(step_times[2])
-    );
-    println!(
-        "    step4 (phi flat memo)     {}",
-        fmt_elapsed(step_times[3])
-    );
-    println!("  π({}) = {}", fmt_thousands(x), fmt_thousands(v4_result));
-}
-
-fn run_dr_vs_baseline_grid(threads: usize) {
-    let xs = [
-        1_000_000_000u128,
-        10_000_000_000,
-        100_000_000_000,
-        1_000_000_000_000,
-    ];
-
-    println!(
-        "── DR vs baseline grid  |  baseline S2 threads = {} ─────────────────────",
-        threads
-    );
-    println!(
-        "{:>14}  {:>10}  {:>10}  {:>8}  {:>8}",
-        "x", "baseline", "DR", "DR/base", "result"
-    );
-    println!("{}", "-".repeat(62));
-
-    for x in xs {
-        let t = Instant::now();
-        let baseline_result = baseline::prime_pi_with_threads(x, threads);
-        let baseline_time = t.elapsed();
-
-        let runtime = dr::profile_prime_pi_dr(x);
-        let ratio = if baseline_time.is_zero() {
-            0.0
-        } else {
-            runtime.total_time.as_secs_f64() / baseline_time.as_secs_f64()
-        };
-        let result_ok = if baseline_result == runtime.result {
-            "ok"
-        } else {
-            "diff"
-        };
-
-        println!(
-            "{:>14}  {:>10}  {:>10}  {:>8.2}  {:>8}",
-            fmt_thousands(x),
-            fmt_elapsed(baseline_time),
-            fmt_elapsed(runtime.total_time),
-            ratio,
-            result_ok
-        );
-    }
 }
 
 fn run_nt_batch(jobs: &[NtBatchJob]) {
@@ -1870,177 +1399,6 @@ fn run_normal_with_progress_display(x: u128, threads: usize) {
     println!("π(n) = {}", fmt_thousands(result));
 }
 
-fn run_phi_backend_grid() {
-    let xs = [
-        1_000u128,
-        10_000,
-        100_000,
-        1_000_000,
-        10_000_000,
-        100_000_000,
-    ];
-
-    println!("── φ backend grid ─────────────────────────────────────────────────");
-    println!(
-        "{:>12}  {:>10}  {:>10}  {:>10}  {:>8}  {:>8}",
-        "x", "Lucy", "Ref", "QRef", "a", "phi"
-    );
-    println!("{}", "-".repeat(82));
-
-    for x in xs {
-        let t = Instant::now();
-        let lucy = rivat3::phi::phi_computation_with_backend(x, rivat3::phi::PhiBackend::Lucy);
-        let lucy_time = t.elapsed();
-
-        let t = Instant::now();
-        let reference =
-            rivat3::phi::phi_computation_with_backend(x, rivat3::phi::PhiBackend::Reference);
-        let reference_time = t.elapsed();
-
-        let t = Instant::now();
-        let quotient = rivat3::phi::phi_computation_with_backend(
-            x,
-            rivat3::phi::PhiBackend::ReferenceQuotient,
-        );
-        let quotient_time = t.elapsed();
-
-        let a_ok = if lucy.a == reference.a && lucy.a == quotient.a {
-            "ok"
-        } else {
-            "diff"
-        };
-        let phi_ok = if lucy.phi_x_a == reference.phi_x_a && lucy.phi_x_a == quotient.phi_x_a {
-            "ok"
-        } else {
-            "diff"
-        };
-
-        println!(
-            "{:>12}  {:>10}  {:>10}  {:>10}  {:>8}  {:>8}",
-            fmt_thousands(x),
-            fmt_elapsed(lucy_time),
-            fmt_elapsed(reference_time),
-            fmt_elapsed(quotient_time),
-            a_ok,
-            phi_ok
-        );
-    }
-}
-
-fn run_phi_backend_profile(x: u128) {
-    println!(
-        "── φ backend profile  x = {} ─────────────────────────────────────",
-        fmt_thousands(x)
-    );
-
-    let t = Instant::now();
-    let lucy = rivat3::phi::phi_computation_with_backend(x, rivat3::phi::PhiBackend::Lucy);
-    let lucy_time = t.elapsed();
-
-    let t = Instant::now();
-    let reference =
-        rivat3::phi::phi_computation_with_backend(x, rivat3::phi::PhiBackend::Reference);
-    let reference_time = t.elapsed();
-
-    let t = Instant::now();
-    let quotient =
-        rivat3::phi::phi_computation_with_backend(x, rivat3::phi::PhiBackend::ReferenceQuotient);
-    let quotient_time = t.elapsed();
-
-    let ratio = if lucy_time.is_zero() {
-        0.0
-    } else {
-        reference_time.as_secs_f64() / lucy_time.as_secs_f64()
-    };
-    let q_ratio = if lucy_time.is_zero() {
-        0.0
-    } else {
-        quotient_time.as_secs_f64() / lucy_time.as_secs_f64()
-    };
-
-    println!("  Lucy       {:>10}", fmt_elapsed(lucy_time));
-    println!("  Reference  {:>10}", fmt_elapsed(reference_time));
-    println!("  Ref/Lucy   {:>10.2}", ratio);
-    println!("  QRef       {:>10}", fmt_elapsed(quotient_time));
-    println!("  QRef/Lucy  {:>10.2}", q_ratio);
-    println!(
-        "  a match    {:>10}    φ match {:>10}",
-        if lucy.a == reference.a && lucy.a == quotient.a {
-            "ok"
-        } else {
-            "diff"
-        },
-        if lucy.phi_x_a == reference.phi_x_a && lucy.phi_x_a == quotient.phi_x_a {
-            "ok"
-        } else {
-            "diff"
-        }
-    );
-    println!(
-        "  a = {}    φ(x,a) = {}",
-        fmt_thousands(lucy.a as u128),
-        fmt_thousands(lucy.phi_x_a)
-    );
-}
-
-fn run_dr_phi_backend_profile(x: u128) {
-    println!(
-        "── DR φ backend profile  x = {} ─────────────────────────────────",
-        fmt_thousands(x)
-    );
-
-    let lucy = dr::profile_prime_pi_dr_with_backend(x, rivat3::phi::PhiBackend::Lucy);
-    let reference = dr::profile_prime_pi_dr_with_backend(x, rivat3::phi::PhiBackend::Reference);
-    let quotient =
-        dr::profile_prime_pi_dr_with_backend(x, rivat3::phi::PhiBackend::ReferenceQuotient);
-
-    let ratio = if lucy.total_time.is_zero() {
-        0.0
-    } else {
-        reference.total_time.as_secs_f64() / lucy.total_time.as_secs_f64()
-    };
-    let q_ratio = if lucy.total_time.is_zero() {
-        0.0
-    } else {
-        quotient.total_time.as_secs_f64() / lucy.total_time.as_secs_f64()
-    };
-
-    println!("  Lucy total      {:>10}", fmt_elapsed(lucy.total_time));
-    println!(
-        "  Reference total {:>10}",
-        fmt_elapsed(reference.total_time)
-    );
-    println!("  Ref/Lucy total  {:>10.2}", ratio);
-    println!("  QRef total      {:>10}", fmt_elapsed(quotient.total_time));
-    println!("  QRef/Lucy total {:>10.2}", q_ratio);
-    println!(
-        "  result match    {:>10}    a match {:>10}",
-        if lucy.result == reference.result && lucy.result == quotient.result {
-            "ok"
-        } else {
-            "diff"
-        },
-        if lucy.a == reference.a && lucy.a == quotient.a {
-            "ok"
-        } else {
-            "diff"
-        }
-    );
-    println!(
-        "  φ time Lucy     {:>10}    φ time Ref {:>10}",
-        fmt_elapsed(lucy.phi_time),
-        fmt_elapsed(reference.phi_time)
-    );
-    println!("  φ time QRef     {:>10}", fmt_elapsed(quotient.phi_time));
-    println!(
-        "  S2 time Lucy    {:>10}    S2 time Ref {:>10}",
-        fmt_elapsed(lucy.s2_time),
-        fmt_elapsed(reference.s2_time)
-    );
-    println!("  S2 time QRef    {:>10}", fmt_elapsed(quotient.s2_time));
-}
-
-/// Runs a benchmark sweep over powers of 10 up to x_max.
 fn run_sweep(x_max: u128, threads: usize) {
     println!(
         "{:>22}  {:>12}  {:>10}  {:>10}  result",
@@ -6028,36 +5386,13 @@ fn main() {
             cli.experimental_mode,
         ),
         Mode::NtBatch { jobs } => run_nt_batch(&jobs),
-        Mode::DrProfile { x } => run_dr_profile(x),
-        // These modes use deep phi recursion (phi_loop_rec up to a~5000 levels at x=1e14+).
-        // The default main-thread stack (1 MB on Windows) overflows; use 64 MB.
-        Mode::DrMeisselProfile { x } => {
-            let t = cli.threads;
-            std::thread::Builder::new().stack_size(64 << 20)
-                .spawn(move || run_dr_meissel_profile(x, t)).unwrap().join().unwrap();
-        }
-        Mode::DrMeissel2Profile { x } => {
-            let t = cli.threads;
-            std::thread::Builder::new().stack_size(64 << 20)
-                .spawn(move || run_dr_meissel2_profile(x, t)).unwrap().join().unwrap();
-        }
-        Mode::DrMeissel3Profile { x } => {
-            let t = cli.threads;
-            std::thread::Builder::new().stack_size(64 << 20)
-                .spawn(move || run_dr_meissel3_profile(x, t)).unwrap().join().unwrap();
-        }
         Mode::DrMeissel4Profile { x } => {
+            // Deep phi recursion at x>=1e14 needs a larger main-thread stack.
             let t = cli.threads;
             std::thread::Builder::new().stack_size(64 << 20)
                 .spawn(move || run_dr_meissel4_profile(x, t)).unwrap().join().unwrap();
         }
-        Mode::DrV3Profile { x } => run_dr_v3_profile(x),
-        Mode::DrV4Profile { x } => run_dr_v4_profile(x),
         Mode::LucyProfile { x } => { lucy_phi_early_stop_profiled(x); }
-        Mode::DrVsBaselineGrid => run_dr_vs_baseline_grid(cli.threads),
-        Mode::PhiBackendGrid => run_phi_backend_grid(),
-        Mode::PhiBackendProfile { x } => run_phi_backend_profile(x),
-        Mode::DrPhiBackendProfile { x } => run_dr_phi_backend_profile(x),
         Mode::Normal { label, x } => {
             use std::io::Write;
             let alpha = rivat3::parameters::choose_alpha(x);
@@ -6163,41 +5498,7 @@ mod tests {
         ];
 
         let cli = parse_cli(&args).expect("CLI should parse");
-        assert!(matches!(cli.mode, Mode::DrProfile { x: 100_000_000_000 }));
-        assert_eq!(cli.experimental_mode, ExperimentalMode::None);
-    }
-
-    #[test]
-    fn parse_cli_accepts_dr_vs_baseline_grid_mode() {
-        let args = vec![
-            "rivat3".to_string(),
-            "--dr-vs-baseline-grid".to_string(),
-            "-t".to_string(),
-            "4".to_string(),
-        ];
-
-        let cli = parse_cli(&args).expect("CLI should parse");
-        assert!(matches!(cli.mode, Mode::DrVsBaselineGrid));
-        assert_eq!(cli.threads, 4);
-        assert_eq!(cli.experimental_mode, ExperimentalMode::None);
-    }
-
-    #[test]
-    fn parse_cli_accepts_nt_alias() {
-        let args = vec![
-            "rivat3".to_string(),
-            "--dr-meissel".to_string(),
-            "1e11".to_string(),
-            "-nt".to_string(),
-            "4".to_string(),
-        ];
-
-        let cli = parse_cli(&args).expect("CLI should parse");
-        assert!(matches!(
-            cli.mode,
-            Mode::DrMeisselProfile { x: 100_000_000_000 }
-        ));
-        assert_eq!(cli.threads, 4);
+        assert!(matches!(cli.mode, Mode::DrMeissel4Profile { x: 100_000_000_000 }));
         assert_eq!(cli.experimental_mode, ExperimentalMode::None);
     }
 
@@ -6227,47 +5528,6 @@ mod tests {
             }
             _ => panic!("expected NtBatch mode"),
         }
-    }
-
-    #[test]
-    fn parse_cli_accepts_phi_backend_grid_mode() {
-        let args = vec!["rivat3".to_string(), "--phi-backend-grid".to_string()];
-
-        let cli = parse_cli(&args).expect("CLI should parse");
-        assert!(matches!(cli.mode, Mode::PhiBackendGrid));
-        assert_eq!(cli.experimental_mode, ExperimentalMode::None);
-    }
-
-    #[test]
-    fn parse_cli_accepts_phi_backend_profile_mode() {
-        let args = vec![
-            "rivat3".to_string(),
-            "--phi-backend-profile".to_string(),
-            "1e11".to_string(),
-        ];
-
-        let cli = parse_cli(&args).expect("CLI should parse");
-        assert!(matches!(
-            cli.mode,
-            Mode::PhiBackendProfile { x: 100_000_000_000 }
-        ));
-        assert_eq!(cli.experimental_mode, ExperimentalMode::None);
-    }
-
-    #[test]
-    fn parse_cli_accepts_dr_phi_backend_profile_mode() {
-        let args = vec![
-            "rivat3".to_string(),
-            "--dr-phi-backend-profile".to_string(),
-            "1e11".to_string(),
-        ];
-
-        let cli = parse_cli(&args).expect("CLI should parse");
-        assert!(matches!(
-            cli.mode,
-            Mode::DrPhiBackendProfile { x: 100_000_000_000 }
-        ));
-        assert_eq!(cli.experimental_mode, ExperimentalMode::None);
     }
 
     #[test]
