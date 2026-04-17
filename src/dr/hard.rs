@@ -1418,12 +1418,21 @@ pub fn s2_hard_sieve(
             let mut m = p;
             while m < n_init { bits[m / 64] &= !(1u64 << (m % 64)); m += p; }
         }
-        phi_vec[0] = bits.iter().map(|w| w.count_ones() as i64).sum::<i64>();
+        let mut count: i64 = bits.iter().map(|w| w.count_ones() as i64).sum();
+        phi_vec[0] = count;
         for bi in 0..(n_all - 1) {
             let pk = primes[c + bi] as usize;
             let mut m = pk;
-            while m < n_init { bits[m / 64] &= !(1u64 << (m % 64)); m += pk; }
-            phi_vec[bi + 1] = bits.iter().map(|w| w.count_ones() as i64).sum::<i64>();
+            while m < n_init {
+                let w = m / 64;
+                let mask = 1u64 << (m % 64);
+                if bits[w] & mask != 0 {
+                    bits[w] &= !mask;
+                    count -= 1;
+                }
+                m += pk;
+            }
+            phi_vec[bi + 1] = count;
         }
     }
 
@@ -1603,7 +1612,7 @@ pub fn s2_hard_sieve_par(
     primes: &[u64],
     s2_primes: &[u64], // primes in (∛x, √x] for P2 = Σ(π(x/p) − (π(p)−1))
 ) -> (i128, u128) {
-    use crate::segment::{advance_wheel_primes, WheelPrimeData, WheelSieve30, W30_SEG, W30_WORDS, wheel30_next_k};
+    use crate::segment::{advance_wheel_primes, MonoCount, WheelPrimeData, WheelSieve30, W30_SEG, W30_WORDS, wheel30_next_k};
     use rayon::prelude::*;
 
     // Phi-style wheel-sieve init: primes {2,3,5} are absorbed into the wheel;
@@ -1693,13 +1702,25 @@ pub fn s2_hard_sieve_par(
                 while m < n_init { bits[m / 64] &= !(1u64 << (m % 64)); m += p; }
             }
             if b_ext > 0 {
-                phi_vec[0] = bits.iter().map(|w| w.count_ones() as i64).sum();
-            }
-            for bi in 0..(b_ext.saturating_sub(1)) {
-                let pk = primes[c + bi] as usize;
-                let mut m = pk;
-                while m < n_init { bits[m / 64] &= !(1u64 << (m % 64)); m += pk; }
-                phi_vec[bi + 1] = bits.iter().map(|w| w.count_ones() as i64).sum();
+                // Single popcount for phi_vec[0]; subsequent bi update a running
+                // counter by counting only cleared bits (was-set check) instead
+                // of re-popcounting the whole bitset each time.
+                let mut count: i64 = bits.iter().map(|w| w.count_ones() as i64).sum();
+                phi_vec[0] = count;
+                for bi in 0..(b_ext - 1) {
+                    let pk = primes[c + bi] as usize;
+                    let mut m = pk;
+                    while m < n_init {
+                        let w = m / 64;
+                        let mask = 1u64 << (m % 64);
+                        if bits[w] & mask != 0 {
+                            bits[w] &= !mask;
+                            count -= 1;
+                        }
+                        m += pk;
+                    }
+                    phi_vec[bi + 1] = count;
+                }
             }
         }
         phi_vec
@@ -1912,7 +1933,7 @@ pub fn s2_hard_sieve_par(
 
             let mut tiny_state = phi_tiny_state(band_lo);
             let mut sieve      = WheelSieve30::new();
-            let mut prefix     = [0u32; W30_WORDS + 1];
+            let mut mono       = MonoCount::new();
             let mut sum: i128  = 0;
             let mut lo         = band_lo;
             // Bucket-sieve: mirror of Pass 1 — only active bulk primes.
@@ -1944,6 +1965,10 @@ pub fn s2_hard_sieve_par(
 
                 // ── Inner loop: bi in 0..b_limit (phi_vec maintained) ────────
                 // bi ≥ b_limit have no remaining leaves; skip phi tracking.
+                // For each bi with a leaf we replace fill_prefix_counts (full
+                // W30_WORDS popcount sweep) by a monotonic scan: since leaves
+                // of a given bi arrive in ascending n, we only popcount the
+                // words between the previous and the current `n`.
                 for bi in 0..b_limit {
                     let b  = bi + c + 1;
                     let pb = primes[b - 1];
@@ -1963,7 +1988,7 @@ pub fn s2_hard_sieve_par(
                     };
 
                     if has_leaf {
-                        sieve.fill_prefix_counts(&mut prefix);
+                        mono.reset();
 
                         if bi < n_hard {
                             let ptr = &mut hard_ptrs[bi];
@@ -1971,7 +1996,7 @@ pub fn s2_hard_sieve_par(
                                 let (n, mu) = hard_leaves[bi][*ptr];
                                 if n >= hi || n > z { break; }
                                 if n >= lo {
-                                    let phi_n = phi_vec[bi] + sieve.count_primes_upto_int(&prefix, n, lo) as i64;
+                                    let phi_n = phi_vec[bi] + sieve.count_primes_upto_int_m(&mut mono, n, lo) as i64;
                                     sum -= mu as i128 * phi_n as i128;
                                 }
                                 *ptr += 1;
@@ -1984,7 +2009,7 @@ pub fn s2_hard_sieve_par(
                                 let n = easy_next_n[ei];
                                 if n >= hi { break; }
                                 if n >= lo {
-                                    let phi_n = phi_vec[bi] + sieve.count_primes_upto_int(&prefix, n, lo) as i64;
+                                    let phi_n = phi_vec[bi] + sieve.count_primes_upto_int_m(&mut mono, n, lo) as i64;
                                     sum += phi_n as i128;
                                 }
                                 if pl_idx <= b {

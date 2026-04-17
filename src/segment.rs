@@ -364,6 +364,30 @@ pub struct WheelSieve30 {
     bits: [u64; W30_WORDS],
 }
 
+/// Monotonic-stop cursor for [`WheelSieve30::count_monotonic`] and
+/// [`WheelSieve30::count_primes_upto_int_m`]. Tracks how many full u64 words
+/// of `bits` have already been folded into `sum`, so subsequent queries with
+/// a larger stop only popcount the newly traversed words. Reset per bi via
+/// [`MonoCount::reset`].
+#[derive(Clone, Copy)]
+pub struct MonoCount {
+    /// Words in `[0, w)` are already added to `sum`.
+    w: usize,
+    /// Set-bit count in `bits[0..w]`.
+    sum: u64,
+}
+
+impl MonoCount {
+    #[inline]
+    pub fn new() -> Self { Self { w: 0, sum: 0 } }
+    #[inline]
+    pub fn reset(&mut self) { self.w = 0; self.sum = 0; }
+}
+
+impl Default for MonoCount {
+    fn default() -> Self { Self::new() }
+}
+
 impl WheelSieve30 {
     /// Creates a zeroed (all-composite) sieve.
     pub fn new() -> Self {
@@ -555,6 +579,7 @@ impl WheelSieve30 {
     ///
     /// Call this inside the window loop when the same prime `p` is crossed off
     /// across many windows; compute [`WheelPrimeData::new(p)`] once outside.
+    #[inline]
     pub fn cross_off_count_pd(&mut self, lo: u64, p: u64, pd: &WheelPrimeData) -> u64 {
         debug_assert_eq!(lo % 30, 0);
         let k0 = (lo + p - 1) / p;
@@ -651,6 +676,45 @@ impl WheelSieve30 {
         let bit  = last_bit & 63;
         let mask = u64::MAX >> (63 - bit);
         prefix[word] + (self.bits[word] & mask).count_ones()
+    }
+
+    /// Counts set bits in `bits[0 ..= last_bit]` using the monotonic cursor.
+    /// Successive calls MUST pass non-decreasing `last_bit` values within the
+    /// same scan; reset via [`MonoCount::reset`] between scans (e.g. between
+    /// `bi` values).
+    #[inline]
+    pub fn count_monotonic(&self, stop: &mut MonoCount, last_bit: usize) -> u64 {
+        debug_assert!(last_bit < W30_BITS);
+        let target_word = last_bit >> 6;
+        // Fold in every full word between the previously-consumed frontier
+        // and `target_word`.
+        while stop.w < target_word {
+            stop.sum += self.bits[stop.w].count_ones() as u64;
+            stop.w += 1;
+        }
+        // Popcount the partial word that contains `last_bit`.
+        let bit = last_bit & 63;
+        let mask = u64::MAX >> (63 - bit);
+        stop.sum + (self.bits[target_word] & mask).count_ones() as u64
+    }
+
+    /// Monotonic variant of [`count_primes_upto_int`]. `n` must satisfy
+    /// `lo ≤ n < lo + W30_SEG` and be non-decreasing across successive calls
+    /// for the same `stop` cursor.
+    #[inline]
+    pub fn count_primes_upto_int_m(&self, stop: &mut MonoCount, n: u64, lo: u64) -> u64 {
+        debug_assert!(n >= lo && n < lo + W30_SEG as u64);
+        let local = (n - lo) as usize;
+        let group = local / 30;
+        let rem = local % 30;
+        let j = W30_RESIDUES.partition_point(|&r| (r as usize) <= rem);
+        let last_bit = if j == 0 {
+            if group == 0 { return 0; }
+            group * 8 - 1
+        } else {
+            group * 8 + j - 1
+        };
+        self.count_monotonic(stop, last_bit)
     }
 }
 
