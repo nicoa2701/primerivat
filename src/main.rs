@@ -1,9 +1,5 @@
-use rivat3::baseline;
-use rivat3::baseline::s2::s2;
-use rivat3::baseline::s3::s3;
 use rivat3::dr;
-use rivat3::math::{icbrt, isqrt};
-use rivat3::sieve::{extract_primes, lucy_hedgehog_with_phi, lucy_phi_early_stop_profiled, pi_at};
+use rivat3::sieve::lucy_phi_early_stop_profiled;
 use std::env;
 use std::io::Write;
 use std::time::Instant;
@@ -157,20 +153,6 @@ fn pct(part: std::time::Duration, total: std::time::Duration) -> f64 {
     }
 }
 
-fn estimate_baseline_memory_mib(x: u128) -> u128 {
-    let z = isqrt(x) as u128;
-    let half_z = (z + 1) / 2;
-    let prime_estimate = if z >= 17 {
-        let zf = z as f64;
-        (zf / zf.ln()).round() as u128
-    } else {
-        z
-    };
-    let base_bytes = (half_z + 1 + z + 1 + prime_estimate) * 8;
-    let estimated_bytes = base_bytes * 17 / 10;
-    estimated_bytes.div_ceil(1024 * 1024)
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct NtBatchJob {
     label: String,
@@ -208,7 +190,7 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
     let mut nt_batch_jobs = Vec::new();
     let mut hard_leaf_term_max = rivat3::parameters::Parameters::DEFAULT_HARD_LEAF_TERM_MAX;
     let mut easy_leaf_term_max = rivat3::parameters::Parameters::DEFAULT_EASY_LEAF_TERM_VALUE;
-    let mut experimental_mode = ExperimentalMode::None;
+    let experimental_mode = ExperimentalMode::None;
     let mut alpha_override: Option<f64> = None;
     let mut _used_t_flag = false;
     let mut _used_non_t_option = false;
@@ -366,18 +348,21 @@ fn run_nt_batch(jobs: &[NtBatchJob]) {
     let mut results = Vec::with_capacity(jobs.len());
 
     for job in jobs {
-        let mem_mib = estimate_baseline_memory_mib(job.x);
         println!(
-            "n = {}  |  Calcul en cours...  [meissel+lucy+s2, {} {}, {} MiB]",
+            "n = {}  |  Calcul en cours...  [primerivat {} | DR v4]",
             job.label,
-            job.threads,
-            if job.threads > 1 { "threads" } else { "thread" },
-            mem_mib
+            env!("GIT_HASH")
         );
         let _ = std::io::stdout().flush();
 
+        let x = job.x;
         let t0 = Instant::now();
-        let result = baseline::prime_pi_with_threads(job.x, job.threads);
+        let result = std::thread::Builder::new()
+            .stack_size(64 << 20)
+            .spawn(move || dr::prime_pi_dr_meissel_v4(x))
+            .unwrap()
+            .join()
+            .unwrap();
         let elapsed = t0.elapsed();
 
         println!(
@@ -437,64 +422,29 @@ fn run_nt_batch(jobs: &[NtBatchJob]) {
 
 
 #[allow(dead_code)]
-fn run_normal_with_progress_display(x: u128, threads: usize) {
-    let mem_mib = estimate_baseline_memory_mib(x);
+fn run_sweep(x_max: u128, _threads: usize) {
     println!(
-        "n = {}  |  Calcul en cours...  [meissel+lucy+s2, {} {}, {} MiB]",
-        fmt_thousands(x),
-        threads,
-        if threads > 1 { "threads" } else { "thread" },
-        mem_mib
+        "{:>22}  {:>12}  result",
+        "x", "total"
     );
-    let _ = std::io::stdout().flush();
-
-    let t0 = Instant::now();
-    let result = baseline::prime_pi_with_threads(x, threads);
-    let elapsed = t0.elapsed();
-
-    println!(
-        "n = {}  |  {}",
-        fmt_thousands(x),
-        fmt_elapsed_seconds(elapsed)
-    );
-    println!("π(n) = {}", fmt_thousands(result));
-}
-
-fn run_sweep(x_max: u128, threads: usize) {
-    println!(
-        "{:>22}  {:>12}  {:>10}  {:>10}  result",
-        "x", "total", "lucy", "S2"
-    );
-    println!("{}", "-".repeat(75));
+    println!("{}", "-".repeat(55));
 
     let mut x = 10u128;
     while x <= x_max {
-        let z_u128 = isqrt(x);
-        let y = icbrt(x);
-        let z = z_u128 as usize;
-
+        let xc = x;
         let t0 = Instant::now();
-        let (small, large, phi_x_a) = lucy_hedgehog_with_phi(x, y);
-        let t_lucy = t0.elapsed();
-
-        let a = pi_at(y, x, z, &small, &large) as usize;
-        let primes = extract_primes(&small, z);
-
-        let t1 = Instant::now();
-        let s2_val = s2(x, a, z, &primes, &small, &large, threads);
-        let t_s2 = t1.elapsed();
-
-        let s3_val = s3(x, a, &primes);
-
-        let result = phi_x_a + a as u128 - 1 - s2_val - s3_val;
+        let result = std::thread::Builder::new()
+            .stack_size(64 << 20)
+            .spawn(move || dr::prime_pi_dr_meissel_v4(xc))
+            .unwrap()
+            .join()
+            .unwrap();
         let total = t0.elapsed();
 
         println!(
-            "{:>22}  {:>12}  {:>10}  {:>10}  {}",
+            "{:>22}  {:>12}  {}",
             fmt_thousands(x),
             fmt_elapsed(total),
-            fmt_elapsed(t_lucy),
-            fmt_elapsed(t_s2),
             fmt_thousands(result)
         );
 
@@ -504,276 +454,23 @@ fn run_sweep(x_max: u128, threads: usize) {
 
 fn print_usage(program: &str) {
     eprintln!("Usage:");
-    eprintln!(
-        "  {} <x> [-t <threads> | -nt <threads>] [-a <alpha> | --alpha <alpha>] [--hard-leaf-term-max <n>] [--easy-leaf-term-max <n>]",
-        program
-    );
-    eprintln!("  {} -nt <x,threads> [-nt <x,threads> ...]", program);
-    eprintln!(
-        "  {} --profile <x> [-t <threads> | -nt <threads>] [--hard-leaf-term-max <n>] [--easy-leaf-term-max <n>] [--candidate-easy-relative-to-hard | --experimental-easy-relative-to-hard <width> | --experimental-hard-relative-to-easy <width>]",
-        program
-    );
-    eprintln!("  {} --dr-profile <x>", program);
-    eprintln!(
-        "  {} --dr-meissel [x] [-t <threads> | -nt <threads>]",
-        program
-    );
-    eprintln!(
-        "  {} --dr-vs-baseline-grid [-t <threads> | -nt <threads>]",
-        program
-    );
-    eprintln!("  {} --phi-backend-grid", program);
-    eprintln!("  {} --phi-backend-profile <x>", program);
-    eprintln!("  {} --dr-phi-backend-profile <x>", program);
-    eprintln!(
-        "  {} --profile <x> [-t <threads> | -nt <threads>] [--hard-leaf-term-max <n>] [--easy-leaf-term-max <n>] [--candidate-easy-relative-to-hard | --candidate-easy-term-band | --phase-c-easy-term-band | --phase-c-package | --phase-c-linked-package | --experimental-easy-relative-to-hard <width> | --experimental-hard-relative-to-easy <width>]",
-        program
-    );
-    eprintln!(
-        "  {} --sweep [x_max] [-t <threads> | -nt <threads>] [--hard-leaf-term-max <n>] [--easy-leaf-term-max <n>] [--candidate-easy-relative-to-hard | --candidate-easy-term-band | --phase-c-easy-term-band | --phase-c-package | --phase-c-linked-package | --experimental-easy-relative-to-hard <width> | --experimental-hard-relative-to-easy <width>]",
-        program
-    );
-    eprintln!("  {} --candidate-grid", program);
-    eprintln!("  {} --candidate-search", program);
-    eprintln!("  {} --candidate-search-dense", program);
-    eprintln!("  {} --candidate-floor-search", program);
-    eprintln!("  {} --candidate-family-compare", program);
-    eprintln!("  {} --candidate-band-search", program);
-    eprintln!("  {} --phase-c-easy-band-grid", program);
-    eprintln!("  {} --phase-c-easy-compare", program);
-    eprintln!("  {} --phase-c-easy-search", program);
-    eprintln!("  {} --phase-c-easy-compare-bands", program);
-    eprintln!("  {} --post-plateau-ordinary-shoulder-grid", program);
-    eprintln!("  {} --post-plateau-ordinary-shoulder-search", program);
-    eprintln!("  {} --post-plateau-ordinary-envelope-grid", program);
-    eprintln!("  {} --post-plateau-ordinary-envelope-search", program);
-    eprintln!("  {} --post-plateau-ordinary-envelope-vs-shoulder", program);
-    eprintln!("  {} --post-plateau-ordinary-hierarchy-grid", program);
-    eprintln!(
-        "  {} --post-plateau-ordinary-hierarchy-vs-envelope",
-        program
-    );
-    eprintln!("  {} --post-plateau-ordinary-assembly-grid", program);
-    eprintln!(
-        "  {} --post-plateau-ordinary-assembly-vs-hierarchy",
-        program
-    );
-    eprintln!(
-        "  {} --post-plateau-ordinary-quasi-literature-grid",
-        program
-    );
-    eprintln!(
-        "  {} --post-plateau-ordinary-quasi-literature-vs-assembly",
-        program
-    );
-    eprintln!(
-        "  {} --post-plateau-ordinary-quasi-literature-vs-assembly-dense",
-        program
-    );
-    eprintln!("  {} --post-plateau-ordinary-dr-like-grid", program);
-    eprintln!(
-        "  {} --post-plateau-ordinary-dr-like-vs-quasi-literature",
-        program
-    );
-    eprintln!("  {} --post-plateau-triptych-compare", program);
-    eprintln!("  {} --phase-c-hard-grid", program);
-    eprintln!("  {} --phase-c-hard-search", program);
-    eprintln!("  {} --phase-c-hard-compare-bands", program);
-    eprintln!("  {} --phase-c-package-grid", program);
-    eprintln!("  {} --phase-c-package-search", program);
-    eprintln!("  {} --phase-c-linked-package-compare", program);
-    eprintln!("  {} --phase-c-linked-grid", program);
-    eprintln!("  {} --phase-c-linked-search", program);
-    eprintln!("  {} --phase-c-linked-candidate-compare", program);
-    eprintln!("  {} --phase-c-reference-compare-dense", program);
-    eprintln!("  {} --phase-c-boundary-package-compare", program);
-    eprintln!("  {} --phase-c-boundary-search", program);
-    eprintln!("  {} --phase-c-boundary-candidate-compare", program);
-    eprintln!("  {} --phase-c-boundary-local-search", program);
-    eprintln!("  {} --phase-c-buffered-boundary-compare", program);
-    eprintln!("  {} --phase-c-buffered-boundary-search", program);
-    eprintln!("  {} --phase-c-quotient-window-compare", program);
-    eprintln!("  {} --phase-c-quotient-window-search", program);
-    eprintln!("  {} --phase-c-quotient-window-shifted-search", program);
-    eprintln!("  {} --phase-c-boundary-quotient-guard-compare", program);
-    eprintln!("  {} --phase-c-boundary-quotient-guard-search", program);
-    eprintln!(
-        "  {} --phase-c-boundary-relative-quotient-band-compare",
-        program
-    );
-    eprintln!(
-        "  {} --phase-c-boundary-relative-quotient-band-search",
-        program
-    );
-    eprintln!(
-        "  {} --phase-c-boundary-relative-quotient-step-band-compare",
-        program
-    );
-    eprintln!(
-        "  {} --phase-c-boundary-relative-quotient-step-band-search",
-        program
-    );
-    eprintln!("  {} --phase-c-step-band-local-search", program);
-    eprintln!(
-        "  {} --phase-c-boundary-vs-relative-quotient-step-dense",
-        program
-    );
-    eprintln!("  {} --phase-c-easy-specialized-grid", program);
-    eprintln!("  {} --phase-c-easy-specialized-compare", program);
-    eprintln!("  {} --phase-c-hard-specialized-grid", program);
-    eprintln!("  {} --phase-c-hard-specialized-compare", program);
-    eprintln!(
-        "  {} --phase-c-boundary-relative-quotient-step-bridge-compare",
-        program
-    );
-    eprintln!(
-        "  {} --phase-c-boundary-relative-quotient-step-bridge-search",
-        program
-    );
-    eprintln!(
-        "  {} --phase-c-boundary-vs-relative-quotient-step-bridge-dense",
-        program
-    );
-    eprintln!("  {} --phase-c-step-band-vs-step-bridge-dense", program);
+    eprintln!("  {} <x>                   Compute π(x)", program);
+    eprintln!("  {} -nt <x,threads>...    Batch: compute π for several x", program);
+    eprintln!("  {} --sweep [x_max]       Sweep x = 10, 100, … up to x_max (default 1e12)", program);
+    eprintln!("  {} --dr-profile <x>      Timing breakdown for π(x) via the DR engine", program);
+    eprintln!("  {} --lucy-profile <x>    Timing breakdown for π(x) via the Lucy baseline", program);
+    eprintln!();
+    eprintln!("Options:");
+    eprintln!("  -t <n>             Rayon thread budget hint (managed by the DR engine).");
+    eprintln!("  -a <α>, --alpha <α>");
+    eprintln!("                     Override the hardware-adaptive α selection.");
+    eprintln!("                     α ∈ [1, 2] for x ≤ 1e15; α ∈ {{1, 2}} only for x > 1e15.");
     eprintln!();
     eprintln!("Examples:");
-    eprintln!("  {} 1e12", program);
-    eprintln!("  {} 1e12 -t 4", program);
-    eprintln!("  {} -nt 1e14,8 -nt 1e11,4 -nt 1e13,5 -nt 1e12,4", program);
-    eprintln!(
-        "  {} --profile 1e13 -t 4 --hard-leaf-term-max 3 --easy-leaf-term-max 1",
-        program
-    );
-    eprintln!("  {} --dr-profile 1e11", program);
-    eprintln!("  {} --dr-meissel 1e11 -nt 4", program);
-    eprintln!("  {} --dr-vs-baseline-grid -t 4", program);
-    eprintln!("  {} --phi-backend-grid", program);
-    eprintln!("  {} --phi-backend-profile 1e11", program);
-    eprintln!("  {} --dr-phi-backend-profile 1e11", program);
-    eprintln!(
-        "  {} --profile 2e7 --hard-leaf-term-max 3 --candidate-easy-relative-to-hard",
-        program
-    );
-    eprintln!(
-        "  {} --profile 2e7 --hard-leaf-term-max 3 --candidate-easy-term-band",
-        program
-    );
-    eprintln!("  {} --profile 2e7 --phase-c-easy-term-band", program);
-    eprintln!("  {} --profile 2e7 --phase-c-package", program);
-    eprintln!("  {} --profile 2e7 --phase-c-linked-package", program);
-    eprintln!(
-        "  {} --profile 2e7 --hard-leaf-term-max 3 --experimental-easy-relative-to-hard 2",
-        program
-    );
-    eprintln!(
-        "  {} --profile 2e7 --easy-leaf-term-max 2 --experimental-hard-relative-to-easy 1",
-        program
-    );
-    eprintln!(
-        "  {} --sweep 1e8 --hard-leaf-term-max 3 --candidate-easy-relative-to-hard",
-        program
-    );
-    eprintln!(
-        "  {} --sweep 1e8 --hard-leaf-term-max 3 --experimental-easy-relative-to-hard 2",
-        program
-    );
-    eprintln!("  {} --candidate-grid", program);
-    eprintln!("  {} --candidate-search", program);
-    eprintln!("  {} --candidate-search-dense", program);
-    eprintln!("  {} --candidate-floor-search", program);
-    eprintln!("  {} --candidate-family-compare", program);
-    eprintln!("  {} --candidate-band-search", program);
-    eprintln!("  {} --phase-c-easy-band-grid", program);
-    eprintln!("  {} --phase-c-easy-compare", program);
-    eprintln!("  {} --phase-c-easy-search", program);
-    eprintln!("  {} --phase-c-easy-compare-bands", program);
-    eprintln!("  {} --phase-c-hard-grid", program);
-    eprintln!("  {} --phase-c-hard-search", program);
-    eprintln!("  {} --phase-c-hard-compare-bands", program);
-    eprintln!("  {} --phase-c-package-grid", program);
-    eprintln!("  {} --phase-c-package-search", program);
-    eprintln!("  {} --phase-c-linked-package-compare", program);
-    eprintln!("  {} --phase-c-linked-grid", program);
-    eprintln!("  {} --phase-c-linked-search", program);
-    eprintln!("  {} --phase-c-linked-candidate-compare", program);
-    eprintln!("  {} --phase-c-reference-compare-dense", program);
-    eprintln!("  {} --phase-c-boundary-package-compare", program);
-    eprintln!("  {} --phase-c-boundary-search", program);
-    eprintln!("  {} --phase-c-boundary-candidate-compare", program);
-    eprintln!("  {} --phase-c-boundary-local-search", program);
-    eprintln!("  {} --phase-c-buffered-boundary-compare", program);
-    eprintln!("  {} --phase-c-buffered-boundary-search", program);
-    eprintln!("  {} --phase-c-quotient-window-compare", program);
-    eprintln!("  {} --phase-c-quotient-window-search", program);
-    eprintln!("  {} --phase-c-quotient-window-shifted-search", program);
-    eprintln!("  {} --phase-c-boundary-quotient-guard-compare", program);
-    eprintln!("  {} --phase-c-boundary-quotient-guard-search", program);
-    eprintln!(
-        "  {} --phase-c-boundary-relative-quotient-band-compare",
-        program
-    );
-    eprintln!(
-        "  {} --phase-c-boundary-relative-quotient-band-search",
-        program
-    );
-    eprintln!(
-        "  {} --phase-c-boundary-relative-quotient-step-band-compare",
-        program
-    );
-    eprintln!(
-        "  {} --phase-c-boundary-relative-quotient-step-band-search",
-        program
-    );
-    eprintln!("  {} --phase-c-step-band-local-search", program);
-    eprintln!(
-        "  {} --phase-c-boundary-vs-relative-quotient-step-dense",
-        program
-    );
-    eprintln!("  {} --phase-c-easy-specialized-grid", program);
-    eprintln!("  {} --phase-c-easy-specialized-compare", program);
-    eprintln!("  {} --phase-c-hard-specialized-grid", program);
-    eprintln!("  {} --phase-c-hard-specialized-compare", program);
-    eprintln!(
-        "  {} --phase-c-boundary-relative-quotient-step-bridge-compare",
-        program
-    );
-    eprintln!(
-        "  {} --phase-c-boundary-relative-quotient-step-bridge-search",
-        program
-    );
-    eprintln!(
-        "  {} --phase-c-boundary-vs-relative-quotient-step-bridge-dense",
-        program
-    );
-    eprintln!("  {} --phase-c-step-band-vs-step-bridge-dense", program);
-    eprintln!("  {} --post-plateau-ordinary-hierarchy-grid", program);
-    eprintln!(
-        "  {} --post-plateau-ordinary-hierarchy-vs-envelope",
-        program
-    );
-    eprintln!("  {} --post-plateau-ordinary-assembly-grid", program);
-    eprintln!(
-        "  {} --post-plateau-ordinary-assembly-vs-hierarchy",
-        program
-    );
-    eprintln!(
-        "  {} --post-plateau-ordinary-quasi-literature-grid",
-        program
-    );
-    eprintln!(
-        "  {} --post-plateau-ordinary-quasi-literature-vs-assembly",
-        program
-    );
-    eprintln!(
-        "  {} --post-plateau-ordinary-quasi-literature-vs-assembly-dense",
-        program
-    );
-    eprintln!("  {} --post-plateau-ordinary-dr-like-grid", program);
-    eprintln!(
-        "  {} --post-plateau-ordinary-dr-like-vs-quasi-literature",
-        program
-    );
-    eprintln!("  {} --sweep 1e14 -t 4", program);
+    eprintln!("  {} 1e13", program);
+    eprintln!("  {} 1e17 --alpha 2", program);
+    eprintln!("  {} -nt 1e13,4 -nt 1e14,8", program);
+    eprintln!("  {} --sweep 1e14", program);
 }
 
 fn main() {
