@@ -1,5 +1,31 @@
 pub mod hard;
 
+/// `C` — prefix of primes absorbed by the Meissel `φ_tiny` inclusion-exclusion.
+/// The DR engine requires `a = π(α·∛x) > C`; otherwise we fall back to
+/// the Lucy–Meissel baseline. Exposed so the test suite can pin the
+/// baseline-fallback threshold.
+const C: usize = 5;
+
+/// Returns `true` when `prime_pi_dr_meissel_v4(x)` would short-circuit to
+/// [`crate::baseline::prime_pi`] instead of running the DR sweep. The
+/// guard is `a = π(α·∛x) ≤ C = 5`, which empirically holds for every
+/// `x < 13³ = 2197`.
+#[doc(hidden)]
+pub fn uses_baseline_fallback(x: u128) -> bool {
+    use crate::math::{icbrt, isqrt};
+    use crate::sieve::sieve_to;
+
+    if x < 2 {
+        return true;
+    }
+    let alpha: f64 = crate::parameters::choose_alpha(x);
+    let cbrt_x = icbrt(x);
+    let sqrt_x = isqrt(x) as u64;
+    let y = ((cbrt_x as f64 * alpha) as u64).clamp(cbrt_x as u64, sqrt_x);
+    let (_small_pi, seed_primes) = sieve_to(y);
+    seed_primes.len() <= C
+}
+
 /// Compute π(x) via the Deléglise-Rivat decomposition
 ///   π(x) = S1 + S2_hard + a − 1 − P2
 ///
@@ -33,7 +59,6 @@ pub fn prime_pi_dr_meissel_v4(x: u128) -> u128 {
     // ── 2. Hard-prime cutoff: b_max = π(√y) ──────────────────────────────────
     let sqrty = isqrt(y as u128) as u64;
     let b_max = seed_primes.partition_point(|&p| p <= sqrty);
-    const C: usize = 5; // phi_tiny uses first c=5 primes
 
     // ── Guard: algorithm requires a > C; fall back to baseline for small x ───
     if a <= C {
@@ -84,7 +109,6 @@ pub fn prime_pi_dr_meissel_v4_timed(x: u128) -> (u128, [std::time::Duration; 5])
     let s2_primes = &all_primes[a..];
     times[0] = t0.elapsed();
 
-    const C: usize = 5;
     if a <= C {
         // Small-x fallback does not surface step timings.
         let result = crate::baseline::prime_pi(x);
@@ -118,6 +142,27 @@ mod tests {
             1_000_000_000, 10_000_000_000, 100_000_000_000, 1_000_000_000_000,
         ] {
             assert_eq!(prime_pi_dr_meissel_v4(x), prime_pi(x), "mismatch at x = {x}");
+        }
+    }
+
+    /// The guard `a = π(α·∛x) ≤ C = 5` inside prime_pi_dr_meissel_v4
+    /// routes tiny x to the Lucy–Meissel baseline. This test pins the
+    /// exact boundary: 13³ = 2197 is the first x for which the DR sweep
+    /// actually runs.
+    #[test]
+    fn baseline_fallback_triggers_below_2197() {
+        use super::uses_baseline_fallback;
+        for x in [0u128, 1, 2, 10, 100, 233, 500, 1_000, 2_196] {
+            assert!(
+                uses_baseline_fallback(x),
+                "x = {x} should fall back to baseline"
+            );
+        }
+        for x in [2_197u128, 2_500, 10_000, 1_000_000, 1_000_000_000_000] {
+            assert!(
+                !uses_baseline_fallback(x),
+                "x = {x} should use the DR engine"
+            );
         }
     }
 
