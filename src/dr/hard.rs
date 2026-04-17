@@ -209,7 +209,22 @@ pub fn s2_hard_sieve_par(
 
     // ── Band layout ──────────────────────────────────────────────────────────
     let num_segs      = ((z - lo_start) / W30_SEG as u64 + 1) as usize;
-    let num_bands     = rayon::current_num_threads().min(num_segs).max(1);
+    // Oversubscribe bands vs. threads. At large x (lo_start = 0) every
+    // ext-easy leaf funnels into band 0's low-n tail and caps Rayon scaling
+    // at ~3× on 8 threads with 1 band per thread. Finer banding lets Rayon
+    // rebalance across the worst-case slice: measured on i5-9300HF at
+    //   x=1e15: 3.64s → 2.63s (-28%),
+    //   x=1e16: 16.3s → 14.8s (-9%),
+    //   x=1e17: 125s → 109s (-13%).
+    // Returns diminish past ~16× threads; env override `RIVAT3_BAND_MULT`
+    // for further tuning on other CPUs.
+    let band_mult: usize = std::env::var("RIVAT3_BAND_MULT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(16);
+    let num_bands     = (rayon::current_num_threads() * band_mult)
+        .min(num_segs)
+        .max(1);
     let segs_per_band = (num_segs + num_bands - 1) / num_bands;
 
     // ── Initial phi_vec at lo_start ───────────────────────────────────────────
