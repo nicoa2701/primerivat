@@ -310,13 +310,17 @@ fn run_batch(jobs: &[BatchJob]) {
         elapsed: std::time::Duration,
     }
 
+    let (l3_mb, _, _) = rivat3::parameters::detect_hw();
     let mut results = Vec::with_capacity(jobs.len());
 
     for job in jobs {
+        let alpha = rivat3::parameters::choose_alpha(job.x);
         println!(
-            "n = {}  |  Calcul en cours...  [primerivat {} | DR v4]",
+            "n = {}  |  Calcul en cours...  [primerivat {} | L3={}Mo α={} DR-v4]",
             job.label,
-            env!("GIT_HASH")
+            env!("GIT_HASH"),
+            l3_mb,
+            alpha
         );
         let _ = std::io::stdout().flush();
 
@@ -485,7 +489,7 @@ fn main() {
             use std::io::Write;
             let alpha = rivat3::parameters::choose_alpha(x);
             println!(
-                "n = {}  |  Calcul en cours...  [primerivat {} | L3={}Mo α={}]",
+                "n = {}  |  Calcul en cours...  [primerivat {} | L3={}Mo α={} DR-v4]",
                 label, env!("GIT_HASH"), l3_mb, alpha
             );
             let _ = std::io::stdout().flush();
