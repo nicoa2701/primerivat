@@ -1,4 +1,5 @@
 pub mod baseline;
+pub mod cpu_detect;
 pub mod dr;
 pub mod math;
 pub mod parameters;

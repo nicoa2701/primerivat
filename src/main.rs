@@ -310,17 +310,15 @@ fn run_batch(jobs: &[BatchJob]) {
         elapsed: std::time::Duration,
     }
 
-    let (l3_mb, _, _) = rivat3::parameters::detect_hw();
     let mut results = Vec::with_capacity(jobs.len());
 
     for job in jobs {
         let alpha = rivat3::parameters::choose_alpha(job.x);
         let engine = if dr::uses_baseline_fallback(job.x) { "baseline" } else { "DR-v4" };
         println!(
-            "n = {}  |  Calcul en cours...  [primerivat {} | L3={}Mo α={} {}]",
+            "n = {}  |  Calcul en cours...  [primerivat {} | α={} {}]",
             job.label,
             env!("GIT_HASH"),
-            l3_mb,
             alpha,
             engine
         );
@@ -452,7 +450,11 @@ fn main() {
         .build_global()
         .expect("failed to build Rayon thread pool");
 
-    let (l3_mb, _cores, _threads) = rivat3::parameters::detect_hw();
+    let cpu = rivat3::cpu_detect::detect();
+    println!(
+        "CPU: {}  ({} cœurs / {} threads, L3 = {} Mo)",
+        cpu.brand, cpu.cores, cpu.threads, cpu.l3_mb
+    );
 
     let args: Vec<String> = env::args().collect();
 
@@ -492,8 +494,8 @@ fn main() {
             let alpha = rivat3::parameters::choose_alpha(x);
             let engine = if dr::uses_baseline_fallback(x) { "baseline" } else { "DR-v4" };
             println!(
-                "n = {}  |  Calcul en cours...  [primerivat {} | L3={}Mo α={} {}]",
-                label, env!("GIT_HASH"), l3_mb, alpha, engine
+                "n = {}  |  Calcul en cours...  [primerivat {} | α={} {}]",
+                label, env!("GIT_HASH"), alpha, engine
             );
             let _ = std::io::stdout().flush();
             let t0 = Instant::now();
