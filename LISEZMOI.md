@@ -28,17 +28,21 @@ Build release, multi-thread, α adaptatif. Deux machines de référence :
 
 | x | i5-9300H | i5-13450HX | π(x) |
 |---|---:|---:|---|
-| `1e11` | 0,018 s | 0,012 s | 4 118 054 813 |
-| `1e13` | 0,25 s  | 0,11 s  | 346 065 536 839 |
-| `1e15` | 5,94 s  | 1,98 s  | 29 844 570 422 669 |
-| `1e16` | 31,7 s  | 9,20 s  | 279 238 341 033 925 |
-| `1e17` | 185 s (α=2) | 48,3 s (α=1) | 2 623 557 157 654 233 |
+| `1e11` | 0,014 s | 0,012 s | 4 118 054 813 |
+| `1e13` | 0,24 s  | 0,11 s  | 346 065 536 839 |
+| `1e14` | 1,08 s  | 0,47 s  | 3 204 941 750 802 |
+| `1e15` | 5,61 s  | 1,98 s  | 29 844 570 422 669 |
+| `1e16` | 30,5 s  | 9,20 s  | 279 238 341 033 925 |
+| `1e17` | 183 s (α=2) | 48,3 s (α=1) | 2 623 557 157 654 233 |
 | `1e18` | —       | 303 s   | 24 739 954 287 740 860 |
 
-Chiffres pour le commit `faf8a77` (scan monotone des leaves en Pass 2). Par
-rapport à la baseline d'origine, cela gagne ~16 % sur le sweep S2_hard entre
-1e13 et 1e16, et ~13 % à 1e18. Les gains suivants devraient venir de SIMD ou
-des chemins ext-easy / P2, qui dominent le runtime à très grand `x`.
+Les chiffres i5-9300H reflètent le HEAD actuel (scan monotone des leaves +
+pré-sieve `{7, 11}`). Ceux du i5-13450HX datent du commit précédent
+(`faf8a77`) et n'ont pas encore été re-mesurés avec le pré-sieve. Gain
+cumulé vs la baseline d'avant la session : **~−23 % de runtime entre 1e13
+et 1e15**, réparti sur trois changements (init `phi_vec` fusionné, curseur
+monotone en remplacement de `fill_prefix_counts`, template pré-sieve
+`{7, 11}`).
 
 ## Algorithme
 
@@ -186,15 +190,20 @@ Valeurs de référence vérifiées :
    chaque requête ne popcount que les mots u64 traversés depuis la leaf
    précédente. Remplace le `fill_prefix_counts` (balayage complet de ~2 185
    mots) qui s'exécutait une fois par bi avec leaves.
-3. **Crible bucket** — dans le cross-off de masse pour les primes `≥ x¹ᐟ⁴`,
+3. **Template pré-sieve `{7, 11}`** — `fill_presieved_7_11` tile un bitmap
+   précalculé de 77 octets (couvrant `lcm(7, 11) · 30 = 2 310` entiers) dans
+   le crible au début de chaque segment, en remplacement du fill-à-1 et des
+   deux boucles de cross-off wheel-30. Le byte-copy séquentiel vectorise
+   bien et évite les bit writes scattered du chemin générique.
+4. **Crible bucket** — dans le cross-off de masse pour les primes `≥ x¹ᐟ⁴`,
    les primes tels que `p² > hi` sont skippés : toute composite dans
    `[lo, hi)` admet un facteur `≤ √hi`.
-4. **Correction seed** — pour `lo < y`, les primes seed dans `[lo, hi)` sont
+5. **Correction seed** — pour `lo < y`, les primes seed dans `[lo, hi)` sont
    crossés comme multiples d'eux-mêmes puis réinjectés via `seed_in_seg` /
    `seed_in_query`.
-5. **Clamp `ext_easy`** — `φ(n, b−1)` est clampé à `≥ 1` quand
+6. **Clamp `ext_easy`** — `φ(n, b−1)` est clampé à `≥ 1` quand
    `n < p_{b−1}`.
-6. **Garde petits x** — `if a ≤ C { return baseline::prime_pi(x) }`.
+7. **Garde petits x** — `if a ≤ C { return baseline::prime_pi(x) }`.
 
 ## Référence
 

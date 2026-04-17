@@ -1810,7 +1810,13 @@ pub fn s2_hard_sieve_par(
                 while b_limit > 0 && lo > leaf_cutoff_lo[b_limit - 1] {
                     b_limit -= 1;
                 }
-                sieve.fill(lo, &tiny_state);
+                if c == 5 {
+                    // Fast path: precomputed {7, 11} template (skips ones-fill
+                    // + two wheel-30 cross-off loops per segment).
+                    sieve.fill_presieved_7_11(lo);
+                } else {
+                    sieve.fill(lo, &tiny_state);
+                }
                 if lo == 0 { sieve.set_bit_for_1(); }
                 let mut running_total = sieve.total_count() as i64;
                 // Counted cross-off for bi < b_limit: maintains running_total for delta.
@@ -1958,7 +1964,11 @@ pub fn s2_hard_sieve_par(
                 while b_limit > 0 && lo > leaf_cutoff_lo[b_limit - 1] {
                     b_limit -= 1;
                 }
-                sieve.fill(lo, &tiny_state);
+                if c == 5 {
+                    sieve.fill_presieved_7_11(lo);
+                } else {
+                    sieve.fill(lo, &tiny_state);
+                }
                 if lo == 0 { sieve.set_bit_for_1(); }
                 let mut running_total = sieve.total_count() as i64;
                 let hi = lo + W30_SEG as u64;

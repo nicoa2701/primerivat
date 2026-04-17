@@ -28,17 +28,20 @@ Release build, multi-threaded, adaptive α. Two reference machines:
 
 | x | i5-9300H | i5-13450HX | π(x) |
 |---|---:|---:|---|
-| `1e11` | 0.018 s | 0.012 s | 4 118 054 813 |
-| `1e13` | 0.25 s  | 0.11 s  | 346 065 536 839 |
-| `1e15` | 5.94 s  | 1.98 s  | 29 844 570 422 669 |
-| `1e16` | 31.7 s  | 9.20 s  | 279 238 341 033 925 |
-| `1e17` | 185 s (α=2) | 48.3 s (α=1) | 2 623 557 157 654 233 |
+| `1e11` | 0.014 s | 0.012 s | 4 118 054 813 |
+| `1e13` | 0.24 s  | 0.11 s  | 346 065 536 839 |
+| `1e14` | 1.08 s  | 0.47 s  | 3 204 941 750 802 |
+| `1e15` | 5.61 s  | 1.98 s  | 29 844 570 422 669 |
+| `1e16` | 30.5 s  | 9.20 s  | 279 238 341 033 925 |
+| `1e17` | 183 s (α=2) | 48.3 s (α=1) | 2 623 557 157 654 233 |
 | `1e18` | —       | 303 s   | 24 739 954 287 740 860 |
 
-Numbers are for commit `faf8a77` (monotonic leaf scan in Pass 2). Compared to
-the original baseline, this shaves ~16 % off the S2_hard sweep at 1e13–1e16
-and ~13 % at 1e18. Further gains would need SIMD or work on the ext-easy /
-P2 paths, which dominate the runtime at very large `x`.
+i5-9300H numbers reflect the current HEAD (monotonic leaf scan + `{7, 11}`
+pre-sieve template). i5-13450HX numbers are from the previous commit
+(`faf8a77`) and have not yet been re-measured with the pre-sieve template.
+Cumulative speedup vs. the pre-session baseline: **~−23 % of runtime at
+1e13–1e15** from three combined changes (fused `phi_vec` init, monotonic
+cursor replacing `fill_prefix_counts`, and the `{7, 11}` pre-sieve tile).
 
 ## Algorithm
 
@@ -182,13 +185,18 @@ Reference values checked:
    leaf query only popcounts the u64 words newly traversed since the previous
    leaf. Replaces the `fill_prefix_counts` full-sieve popcount sweep
    (~2 185 words per call) that used to run once per bi with leaves.
-3. **Bucket sieve** — in the bulk cross-off for primes `≥ x¹ᐟ⁴`, primes with
+3. **Pre-sieve `{7, 11}` template** — `fill_presieved_7_11` tiles a
+   precomputed 77-byte bitmap (covering `lcm(7, 11) · 30 = 2 310` integers)
+   into the sieve at each segment start, replacing the ones-fill + two
+   wheel-30 cross-off loops. Sequential byte-copy vectorises well, avoiding
+   the scattered bit writes of the generic path.
+4. **Bucket sieve** — in the bulk cross-off for primes `≥ x¹ᐟ⁴`, primes with
    `p² > hi` are skipped: any composite in `[lo, hi)` has a factor `≤ √hi`.
-4. **Seed correction** — for `lo < y`, seed primes in `[lo, hi)` are crossed
+5. **Seed correction** — for `lo < y`, seed primes in `[lo, hi)` are crossed
    off as multiples of themselves and re-added via `seed_in_seg` /
    `seed_in_query`.
-5. **`ext_easy` clamp** — `φ(n, b−1)` is clamped to `≥ 1` when `n < p_{b−1}`.
-6. **Small-x guard** — `if a ≤ C { return baseline::prime_pi(x) }`.
+6. **`ext_easy` clamp** — `φ(n, b−1)` is clamped to `≥ 1` when `n < p_{b−1}`.
+7. **Small-x guard** — `if a ≤ C { return baseline::prime_pi(x) }`.
 
 ## Reference
 
