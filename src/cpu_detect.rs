@@ -47,10 +47,50 @@ pub fn cpu_brand() -> String {
     }
 }
 
+/// Returns a compact CPU label derived from [`cpu_brand`], suitable for
+/// the column header of a summary table. Strips the common Intel / AMD
+/// marketing prefixes and the trailing frequency suffix.
+///
+/// Examples:
+/// - `"Intel(R) Core(TM) i5-9300HF CPU @ 2.40GHz"` → `"i5-9300HF"`
+/// - `"Intel(R) Core(TM) i5-13450HX"` → `"i5-13450HX"`
+/// - `"AMD Ryzen 9 5950X 16-Core Processor"` → `"Ryzen 9 5950X"`
+///
+/// Falls back to the full brand string when no well-known prefix matches.
+pub fn cpu_short() -> String {
+    let b = cpu_brand();
+    let mut s = b.as_str();
+    for prefix in ["Intel(R) Core(TM) ", "Intel(R) Xeon(R) ", "AMD "] {
+        if let Some(rest) = s.strip_prefix(prefix) {
+            s = rest;
+            break;
+        }
+    }
+    for suffix_sep in [" CPU @", " @"] {
+        if let Some(i) = s.find(suffix_sep) {
+            s = &s[..i];
+        }
+    }
+    // Drop a trailing "NN-Core Processor" tail (AMD).
+    if let Some(i) = s.find(" Processor") {
+        s = &s[..i];
+    }
+    if let Some(i) = s.rfind(" ") {
+        // If the last token matches "<N>-Core", drop it (AMD decorations).
+        let (head, tail) = s.split_at(i);
+        if tail.trim_start().contains("-Core") {
+            s = head;
+        }
+    }
+    s.trim().to_string()
+}
+
 /// Snapshot of the hardware fields shown in the startup banner.
 #[derive(Clone, Debug)]
 pub struct CpuInfo {
     pub brand: String,
+    /// Compact model label — see [`cpu_short`].
+    pub short: String,
     pub cores: usize,
     pub threads: usize,
     pub l3_mb: usize,
@@ -60,6 +100,7 @@ pub struct CpuInfo {
 pub fn detect() -> CpuInfo {
     CpuInfo {
         brand: cpu_brand(),
+        short: cpu_short(),
         cores: num_cpus::get_physical(),
         threads: num_cpus::get(),
         l3_mb: cache_size::l3_cache_size().unwrap_or(8 << 20) >> 20,

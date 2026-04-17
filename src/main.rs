@@ -356,7 +356,11 @@ fn run_batch(jobs: &[BatchJob]) {
 
     results.sort_unstable_by_key(|row| row.x);
 
-    println!("--------------------- Résumé ---------------------");
+    let short = rivat3::cpu_detect::cpu_short();
+    println!(
+        "--------------------- Résumé {} ---------------------",
+        short
+    );
     println!(
         "{:<7}| {:<19}| {:>9} | {:>8}",
         "Limite", "π(n)", "Temps", "×Temps"
