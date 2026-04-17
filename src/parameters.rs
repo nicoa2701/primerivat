@@ -1,12 +1,26 @@
 use crate::math::{icbrt, isqrt};
 use crate::sieve::pi_at;
+use std::sync::OnceLock;
+
+static ALPHA_OVERRIDE: OnceLock<f64> = OnceLock::new();
+
+/// Pins the process-wide alpha value, bypassing hardware-adaptive selection.
+/// Only the first call takes effect; returns `Err` if already set.
+pub fn set_alpha_override(alpha: f64) -> Result<(), f64> {
+    ALPHA_OVERRIDE.set(alpha)
+}
 
 /// Hardware-adaptive alpha selector for the DR algorithm.
 ///
 /// Returns 2.0 only when x is large enough AND the CPU has a small L3
 /// with few cores — otherwise α=1.0 wins (measured: α=2.0 regresses 35%
 /// on i5-13450HX at 1e17 but gains 12% on i5-9300H).
+///
+/// A process-wide override set via [`set_alpha_override`] takes precedence.
 pub fn choose_alpha(x: u128) -> f64 {
+    if let Some(&alpha) = ALPHA_OVERRIDE.get() {
+        return alpha;
+    }
     if x < 30_000_000_000_000_000u128 {
         return 1.0;
     }

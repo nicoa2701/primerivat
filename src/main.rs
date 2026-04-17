@@ -117,6 +117,55 @@ fn parse_relative_width(flag: &str, s: &str) -> Result<u128, String> {
     }
 }
 
+fn parse_alpha(s: &str) -> Result<f64, String> {
+    match s.parse::<f64>() {
+        Ok(v) if v.is_finite() && (1.0..=2.0).contains(&v) => Ok(v),
+        Ok(_) => Err("alpha must be between 1 and 2 (inclusive)".to_string()),
+        Err(_) => Err(format!("'{}' is not a valid alpha value", s)),
+    }
+}
+
+const ALPHA_INTERMEDIATE_MAX_X: u128 = 1_000_000_000_000_000; // 1e15
+
+fn alpha_is_canonical(alpha: f64) -> bool {
+    (alpha - 1.0).abs() < 1e-9 || (alpha - 2.0).abs() < 1e-9
+}
+
+fn mode_reference_x(mode: &Mode) -> Option<u128> {
+    match mode {
+        Mode::Normal { x, .. }
+        | Mode::Profile { x }
+        | Mode::DrProfile { x }
+        | Mode::DrMeisselProfile { x }
+        | Mode::DrMeissel2Profile { x }
+        | Mode::DrMeissel3Profile { x }
+        | Mode::DrMeissel4Profile { x }
+        | Mode::DrV3Profile { x }
+        | Mode::DrV4Profile { x }
+        | Mode::LucyProfile { x }
+        | Mode::PhiBackendProfile { x }
+        | Mode::DrPhiBackendProfile { x } => Some(*x),
+        Mode::Sweep { x_max } => Some(*x_max),
+        Mode::NtBatch { jobs } => jobs.iter().map(|j| j.x).max(),
+        _ => None,
+    }
+}
+
+fn validate_alpha_override(alpha: f64, mode: &Mode) -> Result<(), String> {
+    if alpha_is_canonical(alpha) {
+        return Ok(());
+    }
+    if let Some(x) = mode_reference_x(mode) {
+        if x > ALPHA_INTERMEDIATE_MAX_X {
+            return Err(format!(
+                "alpha strictement entre 1 et 2 n'est autorisé que pour x ≤ 1e15 (ici x = {}); au-delà, utilisez exactement 1 ou 2",
+                x
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn fmt_delta_usize(current: usize, experimental: usize) -> String {
     match experimental.cmp(&current) {
         std::cmp::Ordering::Greater => format!("+{}", experimental - current),
@@ -168,6 +217,7 @@ struct Cli {
     hard_leaf_term_max: u128,
     easy_leaf_term_max: u128,
     experimental_mode: ExperimentalMode,
+    alpha_override: Option<f64>,
 }
 
 enum Mode {
@@ -273,6 +323,7 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
     let mut hard_leaf_term_max = rivat3::parameters::Parameters::DEFAULT_HARD_LEAF_TERM_MAX;
     let mut easy_leaf_term_max = rivat3::parameters::Parameters::DEFAULT_EASY_LEAF_TERM_VALUE;
     let mut experimental_mode = ExperimentalMode::None;
+    let mut alpha_override: Option<f64> = None;
     let mut _used_t_flag = false;
     let mut _used_non_t_option = false;
     let mut mode: Option<Mode> = None;
@@ -298,6 +349,15 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
                 } else {
                     threads = parse_threads(value)?;
                 }
+                i += 2;
+            }
+            "-a" | "--alpha" => {
+                let flag = args[i].clone();
+                let value = args
+                    .get(i + 1)
+                    .ok_or_else(|| format!("missing value after {}", flag))?;
+                alpha_override = Some(parse_alpha(value)?);
+                _used_non_t_option = true;
                 i += 2;
             }
             "--hard-leaf-term-max" => {
@@ -805,6 +865,7 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
         hard_leaf_term_max,
         easy_leaf_term_max,
         experimental_mode,
+        alpha_override,
     })
 }
 
@@ -5532,7 +5593,7 @@ fn run_candidate_floor_search() {
 fn print_usage(program: &str) {
     eprintln!("Usage:");
     eprintln!(
-        "  {} <x> [-t <threads> | -nt <threads>] [--hard-leaf-term-max <n>] [--easy-leaf-term-max <n>]",
+        "  {} <x> [-t <threads> | -nt <threads>] [-a <alpha> | --alpha <alpha>] [--hard-leaf-term-max <n>] [--easy-leaf-term-max <n>]",
         program
     );
     eprintln!("  {} -nt <x,threads> [-nt <x,threads> ...]", program);
@@ -5826,6 +5887,14 @@ fn main() {
         }
     };
 
+    if let Some(alpha) = cli.alpha_override {
+        if let Err(e) = validate_alpha_override(alpha, &cli.mode) {
+            eprintln!("Error: {}", e);
+            std::process::exit(1);
+        }
+        let _ = rivat3::parameters::set_alpha_override(alpha);
+    }
+
     match cli.mode {
         Mode::Sweep { x_max } => {
             if matches!(cli.experimental_mode, ExperimentalMode::None) {
@@ -6026,6 +6095,53 @@ mod tests {
         assert_eq!(cli.hard_leaf_term_max, 3);
         assert_eq!(cli.easy_leaf_term_max, 2);
         assert_eq!(cli.experimental_mode, ExperimentalMode::None);
+    }
+
+    #[test]
+    fn parse_cli_accepts_alpha_short_and_long() {
+        let short = parse_cli(&[
+            "rivat3".to_string(),
+            "1e6".to_string(),
+            "-a".to_string(),
+            "2".to_string(),
+        ])
+        .expect("CLI should parse");
+        assert_eq!(short.alpha_override, Some(2.0));
+
+        let long = parse_cli(&[
+            "rivat3".to_string(),
+            "1e6".to_string(),
+            "--alpha".to_string(),
+            "1.5".to_string(),
+        ])
+        .expect("CLI should parse");
+        assert_eq!(long.alpha_override, Some(1.5));
+    }
+
+    #[test]
+    fn parse_cli_rejects_alpha_out_of_range() {
+        for value in ["0", "0.5", "2.1", "3"] {
+            let res = parse_cli(&[
+                "rivat3".to_string(),
+                "1e6".to_string(),
+                "--alpha".to_string(),
+                value.to_string(),
+            ]);
+            let err = match res {
+                Err(e) => e,
+                Ok(_) => panic!("expected error for alpha={value}"),
+            };
+            assert!(err.contains("between 1 and 2"), "msg was: {err}");
+        }
+    }
+
+    #[test]
+    fn validate_alpha_override_enforces_x_threshold() {
+        use super::{Mode, validate_alpha_override};
+        assert!(validate_alpha_override(1.5, &Mode::Normal { label: "1e15".to_string(), x: 1_000_000_000_000_000 }).is_ok());
+        assert!(validate_alpha_override(1.5, &Mode::Normal { label: "2e15".to_string(), x: 2_000_000_000_000_000 }).is_err());
+        assert!(validate_alpha_override(1.0, &Mode::Normal { label: "1e17".to_string(), x: 100_000_000_000_000_000 }).is_ok());
+        assert!(validate_alpha_override(2.0, &Mode::Normal { label: "1e17".to_string(), x: 100_000_000_000_000_000 }).is_ok());
     }
 
     #[test]

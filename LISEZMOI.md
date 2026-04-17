@@ -73,6 +73,12 @@ La forme fermée `ext_easy` `φ(n, b−1) = π(n) − (b−2)` est valide lorsqu
 - `x ≥ 3e16` → α = 2,0 (~41% plus rapide à `1e17` grâce à moins de fenêtres
   de crible)
 
+La sélection automatique peut être surchargée depuis la CLI via `-a <α>` ou
+`--alpha <α>`. Plage acceptée :
+
+- `x ≤ 1e15` → tout `α ∈ [1, 2]` (ex. `1,5`)
+- `x > 1e15` → seulement `α ∈ {1, 2}` (les valeurs intermédiaires sont rejetées)
+
 > ⚠️ Seul `α ∈ {1.0, 2.0}` est sûr. Les valeurs intermédiaires (ex. α = 1,25)
 > produisent des résultats faux pour certains `x` — cause non identifiée.
 
@@ -132,6 +138,10 @@ rivat3::prime_pi_with_threads(x, threads)
 ```bash
 # Calcul direct (le moteur DR v4 gère son propre parallélisme Rayon)
 cargo run --release -- 1e13
+
+# Surcharger l'α sélectionné automatiquement (forme courte ou longue)
+cargo run --release -- 1e17 -a 2
+cargo run --release -- 1e13 --alpha 1
 
 # Profilage
 cargo run --release -- --profile 1e11     # profil de phase baseline

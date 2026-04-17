@@ -71,6 +71,12 @@ The `ext_easy` closed form `φ(n, b−1) = π(n) − (b−2)` is valid when
 - `x < 3e16` → α = 1.0 (lower overhead for small `x`)
 - `x ≥ 3e16` → α = 2.0 (~41% faster at `1e17` thanks to fewer sieve windows)
 
+The auto-selection can be overridden from the CLI with `-a <α>` or
+`--alpha <α>`. Accepted range:
+
+- `x ≤ 1e15` → any `α ∈ [1, 2]` (e.g. `1.5`)
+- `x > 1e15` → only `α ∈ {1, 2}` (intermediate values are rejected)
+
 > ⚠️ Only `α ∈ {1.0, 2.0}` is safe. Intermediate values (e.g. α = 1.25)
 > produce wrong results at specific `x` — root cause not yet identified.
 
@@ -128,6 +134,10 @@ rivat3::prime_pi_with_threads(x, threads)
 ```bash
 # Direct computation (the DR v4 engine manages its own Rayon parallelism)
 cargo run --release -- 1e13
+
+# Override the auto-selected α (short or long form)
+cargo run --release -- 1e17 -a 2
+cargo run --release -- 1e13 --alpha 1
 
 # Profiling
 cargo run --release -- --profile 1e11     # baseline phase profile
