@@ -315,12 +315,14 @@ fn run_batch(jobs: &[BatchJob]) {
 
     for job in jobs {
         let alpha = rivat3::parameters::choose_alpha(job.x);
+        let engine = if dr::uses_baseline_fallback(job.x) { "baseline" } else { "DR-v4" };
         println!(
-            "n = {}  |  Calcul en cours...  [primerivat {} | L3={}Mo α={} DR-v4]",
+            "n = {}  |  Calcul en cours...  [primerivat {} | L3={}Mo α={} {}]",
             job.label,
             env!("GIT_HASH"),
             l3_mb,
-            alpha
+            alpha,
+            engine
         );
         let _ = std::io::stdout().flush();
 
@@ -488,9 +490,10 @@ fn main() {
         Mode::Normal { label, x } => {
             use std::io::Write;
             let alpha = rivat3::parameters::choose_alpha(x);
+            let engine = if dr::uses_baseline_fallback(x) { "baseline" } else { "DR-v4" };
             println!(
-                "n = {}  |  Calcul en cours...  [primerivat {} | L3={}Mo α={} DR-v4]",
-                label, env!("GIT_HASH"), l3_mb, alpha
+                "n = {}  |  Calcul en cours...  [primerivat {} | L3={}Mo α={} {}]",
+                label, env!("GIT_HASH"), l3_mb, alpha, engine
             );
             let _ = std::io::stdout().flush();
             let t0 = Instant::now();
