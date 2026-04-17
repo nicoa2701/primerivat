@@ -120,4 +120,27 @@ mod tests {
             assert_eq!(prime_pi_dr_meissel_v4(x), prime_pi(x), "mismatch at x = {x}");
         }
     }
+
+    /// Known-good π values for very small x, exercising the baseline
+    /// fallback path inside prime_pi_dr_meissel_v4 (a = π(α·∛x) ≤ 5
+    /// whenever x < 13³ = 2197) and the boundary just above it.
+    #[test]
+    fn prime_pi_dr_meissel_v4_small_x_known_values() {
+        let cases = [
+            (10u128, 4u128),       // primes: 2, 3, 5, 7
+            (100, 25),             // baseline path
+            (233, 51),             // baseline path, not a power of 10
+            (500, 95),             // baseline path
+            (1_000, 168),          // baseline path
+            (2_196, 327),          // last x routed to baseline (icbrt=12)
+            (2_197, 327),          // first x routed to DR (icbrt=13, π(13)=6 > C)
+        ];
+        for (x, expected) in cases {
+            assert_eq!(
+                prime_pi_dr_meissel_v4(x),
+                expected,
+                "π({x}) expected {expected}"
+            );
+        }
+    }
 }
