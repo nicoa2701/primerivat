@@ -35,7 +35,7 @@ Build release, multi-thread, α adaptatif. Deux machines de référence :
 | `1e15` | 5,507 s | 1,831 s | 29 844 570 422 669 |
 | `1e16` | 29,7 s  | 8,63 s  | 279 238 341 033 925 |
 | `1e17` | 160 s (α=2) | 44,8 s (α=1) | 2 623 557 157 654 233 |
-| `1e18` | —       | 301 s (α=1) | 24 739 954 287 740 860 |
+| `1e18` | 1266 s (α=2) | 301 s (α=1) | 24 739 954 287 740 860 |
 
 Les deux colonnes sont des mesures cold en single-run sur le commit
 `9e9162a`, chaque machine lancée à froid (le i5-9300H subit un thermal
