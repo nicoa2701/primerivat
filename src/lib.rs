@@ -3,8 +3,6 @@ pub mod dr;
 pub mod math;
 pub mod parameters;
 pub mod phi;
-pub mod phi_cache;
-pub mod pi_table;
 pub mod primes;
 pub mod segment;
 pub mod sieve;
