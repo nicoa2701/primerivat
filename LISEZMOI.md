@@ -28,21 +28,24 @@ Build release, multi-thread, α adaptatif. Deux machines de référence :
 
 | x | i5-9300H | i5-13450HX | π(x) |
 |---|---:|---:|---|
-| `1e11` | 0,014 s | 0,012 s | 4 118 054 813 |
-| `1e13` | 0,24 s  | 0,11 s  | 346 065 536 839 |
-| `1e14` | 1,08 s  | 0,47 s  | 3 204 941 750 802 |
-| `1e15` | 5,61 s  | 1,98 s  | 29 844 570 422 669 |
-| `1e16` | 30,5 s  | 9,20 s  | 279 238 341 033 925 |
-| `1e17` | 183 s (α=2) | 48,3 s (α=1) | 2 623 557 157 654 233 |
-| `1e18` | —       | 303 s   | 24 739 954 287 740 860 |
+| `1e11` | 0,015 s | 0,013 s | 4 118 054 813 |
+| `1e12` | 0,055 s | 0,034 s | 37 607 912 018 |
+| `1e13` | 0,237 s | 0,104 s | 346 065 536 839 |
+| `1e14` | 1,077 s | 0,432 s | 3 204 941 750 802 |
+| `1e15` | 5,507 s | 1,831 s | 29 844 570 422 669 |
+| `1e16` | 29,7 s  | 8,63 s  | 279 238 341 033 925 |
+| `1e17` | 160 s (α=2) | 44,8 s (α=1) | 2 623 557 157 654 233 |
+| `1e18` | —       | 301 s (α=1) | 24 739 954 287 740 860 |
 
-Les chiffres i5-9300H reflètent le HEAD actuel (scan monotone des leaves +
-pré-sieve `{7, 11}`). Ceux du i5-13450HX datent du commit précédent
-(`faf8a77`) et n'ont pas encore été re-mesurés avec le pré-sieve. Gain
-cumulé vs la baseline d'avant la session : **~−23 % de runtime entre 1e13
-et 1e15**, réparti sur trois changements (init `phi_vec` fusionné, curseur
-monotone en remplacement de `fill_prefix_counts`, template pré-sieve
-`{7, 11}`).
+Les deux colonnes sont des mesures cold en single-run sur le commit
+`9e9162a`, chaque machine lancée à froid (le i5-9300H subit un thermal
+throttling notable en régime soutenu, donc les runs cold représentent bien
+une invocation interactive unique).
+
+Gain cumulé vs la baseline d'avant la session : **~−24 % de runtime sur
+1e13–1e17 (i5-9300H)**, ~−14 % à 1e18 (i5-13450HX). Trois changements
+combinés : init `phi_vec` fusionné, curseur monotone remplaçant
+`fill_prefix_counts`, template pré-sieve `{7, 11}`.
 
 ## Algorithme
 
