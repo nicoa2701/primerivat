@@ -3726,7 +3726,9 @@ pub fn prime_pi(x: u128, threads: usize) -> u128 {
 /// BIT + segmented sieve sweep implemented in [`hard::hard_leaves_bit`].
 /// All other components (φ, ordinary, easy) still use Lucy-Hedgehog tables.
 ///
-/// This is the entry point wired into [`crate::deleglise_rivat`].
+/// Legacy variant — kept for profiling and cross-version comparison.
+/// The production entry point is now [`prime_pi_dr_meissel_v4`], which is
+/// wired into [`crate::deleglise_rivat`].
 pub fn prime_pi_dr(x: u128) -> u128 {
     profile_prime_pi_dr(x).result
 }
