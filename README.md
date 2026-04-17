@@ -6,7 +6,8 @@
 based on the **Deléglise–Rivat** algorithm.
 
 The current engine (`prime_pi_dr_meissel_v4`) is active by default and
-computes π(x) exactly up to at least `x = 1e17` on commodity hardware.
+computes π(x) exactly up to at least `x = 1e18` on commodity hardware
+(verified cross-CPU at commit `9e9162a`).
 
 ## Quick start
 
@@ -16,8 +17,9 @@ cargo run --release -- 1e13        # π(1e13) = 346 065 536 839
 cargo run --release -- 1e15        # π(1e15) = 29 844 570 422 669
 ```
 
-The binary prints the short git hash (`[dr-meissel4 <hash>]`) so that multiple
-builds can be compared side by side.
+The binary prints a startup tag with the short git hash, detected L3, and
+the selected α (e.g. `[primerivat 9e9162a | L3=8Mo α=2]`), making it easy
+to compare multiple builds side by side.
 
 ## Measured performance
 
@@ -120,8 +122,8 @@ reached at `x ≥ 1e15`.
 
 ```text
 src/
-├── bit.rs          # Fenwick tree (used implicitly via count_primes_upto_int)
-├── segment.rs      # WheelSieve30 (wheel-mod-30 segmented sieve), primes_up_to
+├── bit.rs          # Fenwick tree (legacy S2 variants only; prod uses prefix popcount)
+├── segment.rs      # WheelSieve30 (wheel-mod-30 segmented sieve) + MonoCount cursor
 ├── baseline/       # Lucy–Meissel reference; used as small-x fallback
 ├── dr/
 │   ├── mod.rs      # prime_pi_dr_meissel_v4 (active) + legacy variants
@@ -179,6 +181,7 @@ Reference values checked:
 - π(1e15) = 29 844 570 422 669
 - π(1e16) = 279 238 341 033 925
 - π(1e17) = 2 623 557 157 654 233
+- π(1e18) = 24 739 954 287 740 860
 
 ## Implementation notes
 
