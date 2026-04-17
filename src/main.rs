@@ -96,6 +96,14 @@ fn parse_alpha(s: &str) -> Result<f64, String> {
     }
 }
 
+fn parse_band_mult(s: &str) -> Result<usize, String> {
+    match s.parse::<usize>() {
+        Ok(v) if (1..=1024).contains(&v) => Ok(v),
+        Ok(_) => Err("band-mult must be between 1 and 1024".to_string()),
+        Err(_) => Err(format!("'{}' is not a valid band-mult value", s)),
+    }
+}
+
 const ALPHA_INTERMEDIATE_MAX_X: u128 = 1_000_000_000_000_000; // 1e15
 
 fn alpha_is_canonical(alpha: f64) -> bool {
@@ -152,6 +160,7 @@ struct Cli {
     #[allow(dead_code)]
     experimental_mode: ExperimentalMode,
     alpha_override: Option<f64>,
+    band_mult_override: Option<usize>,
 }
 
 enum Mode {
@@ -174,6 +183,7 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
     let mut easy_leaf_term_max = rivat3::parameters::Parameters::DEFAULT_EASY_LEAF_TERM_VALUE;
     let experimental_mode = ExperimentalMode::None;
     let mut alpha_override: Option<f64> = None;
+    let mut band_mult_override: Option<usize> = None;
     let mut _used_t_flag = false;
     let mut _used_non_t_option = false;
     let mut mode: Option<Mode> = None;
@@ -201,6 +211,15 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
                         e
                     ),
                 }
+                _used_non_t_option = true;
+                i += 2;
+            }
+            "-b" | "--band-mult" => {
+                let flag = args[i].clone();
+                let value = args
+                    .get(i + 1)
+                    .ok_or_else(|| format!("missing value after {}", flag))?;
+                band_mult_override = Some(parse_band_mult(value)?);
                 _used_non_t_option = true;
                 i += 2;
             }
@@ -279,6 +298,7 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
         easy_leaf_term_max,
         experimental_mode,
         alpha_override,
+        band_mult_override,
     })
 }
 
@@ -456,6 +476,9 @@ fn print_usage(program: &str) {
     eprintln!("  -a <α>, --alpha <α>");
     eprintln!("                     Override the hardware-adaptive α selection.");
     eprintln!("                     α ∈ [1, 2] for x ≤ 1e15; α ∈ {{1, 2}} only for x > 1e15.");
+    eprintln!("  -b <N>, --band-mult <N>");
+    eprintln!("                     Bands per Rayon thread in the DR engine (1..=1024).");
+    eprintln!("                     Default 16; higher = finer Rayon rebalancing.");
     eprintln!();
     eprintln!("Examples:");
     eprintln!("  {} 1e13", program);
@@ -501,6 +524,10 @@ fn main() {
                 e
             ),
         }
+    }
+
+    if let Some(mult) = cli.band_mult_override {
+        let _ = rivat3::parameters::set_band_mult_override(mult);
     }
 
     match cli.mode {
@@ -574,6 +601,31 @@ mod tests {
     #[test]
     fn parse_cli_rejects_unknown_option() {
         let args = vec!["rivat3".to_string(), "--nope".to_string()];
+        assert!(parse_cli(&args).is_err());
+    }
+
+    #[test]
+    fn parse_cli_accepts_band_mult_short_and_long() {
+        for flag in ["-b", "--band-mult"] {
+            let args = vec![
+                "rivat3".to_string(),
+                "1e13".to_string(),
+                flag.to_string(),
+                "32".to_string(),
+            ];
+            let cli = parse_cli(&args).expect("CLI should parse");
+            assert_eq!(cli.band_mult_override, Some(32));
+        }
+    }
+
+    #[test]
+    fn parse_cli_rejects_out_of_range_band_mult() {
+        let args = vec![
+            "rivat3".to_string(),
+            "1e13".to_string(),
+            "-b".to_string(),
+            "9999".to_string(),
+        ];
         assert!(parse_cli(&args).is_err());
     }
 }

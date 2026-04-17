@@ -3,11 +3,31 @@ use crate::sieve::pi_at;
 use std::sync::OnceLock;
 
 static ALPHA_OVERRIDE: OnceLock<f64> = OnceLock::new();
+static BAND_MULT_OVERRIDE: OnceLock<usize> = OnceLock::new();
 
 /// Pins the process-wide alpha value, bypassing hardware-adaptive selection.
 /// Only the first call takes effect; returns `Err` if already set.
 pub fn set_alpha_override(alpha: f64) -> Result<(), f64> {
     ALPHA_OVERRIDE.set(alpha)
+}
+
+/// Overrides the DR engine's band multiplier (bands per Rayon thread).
+/// See [`band_mult`] for the default.
+pub fn set_band_mult_override(mult: usize) -> Result<(), usize> {
+    BAND_MULT_OVERRIDE.set(mult)
+}
+
+/// Bands-per-thread multiplier used by `s2_hard_sieve_par`. Defaults to 16
+/// (empirically optimal on i5-9300HF); overridable via
+/// [`set_band_mult_override`] or the `RIVAT3_BAND_MULT` env var.
+pub fn band_mult() -> usize {
+    if let Some(&m) = BAND_MULT_OVERRIDE.get() {
+        return m;
+    }
+    std::env::var("RIVAT3_BAND_MULT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(16)
 }
 
 /// Hardware-adaptive alpha selector for the DR algorithm.

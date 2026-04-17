@@ -216,13 +216,9 @@ pub fn s2_hard_sieve_par(
     //   x=1e15: 3.64s → 2.63s (-28%),
     //   x=1e16: 16.3s → 14.8s (-9%),
     //   x=1e17: 125s → 109s (-13%).
-    // Returns diminish past ~16× threads; env override `RIVAT3_BAND_MULT`
-    // for further tuning on other CPUs.
-    let band_mult: usize = std::env::var("RIVAT3_BAND_MULT")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(16);
-    let num_bands     = (rayon::current_num_threads() * band_mult)
+    // Returns diminish past ~16× threads; override via `-b` CLI flag,
+    // `parameters::set_band_mult_override`, or `RIVAT3_BAND_MULT` env var.
+    let num_bands     = (rayon::current_num_threads() * crate::parameters::band_mult())
         .min(num_segs)
         .max(1);
     let segs_per_band = (num_segs + num_bands - 1) / num_bands;
