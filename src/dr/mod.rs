@@ -71,7 +71,7 @@ pub fn prime_pi_dr_meissel_v4(x: u128) -> u128 {
     // ── 4+5. S2_hard + P2 in one combined sweep ───────────────────────────────
     let all_primes = primes_up_to(sqrt_x, &seed_primes);
     let s2_primes = &all_primes[a..];
-    let (s2_hard, p2) = hard::s2_hard_sieve_par(x, y, z, C, b_max, a, &seed_primes, s2_primes);
+    let (s2_hard, p2, _profile) = hard::s2_hard_sieve_par(x, y, z, C, b_max, a, &seed_primes, s2_primes);
 
     // ── 6. π(x) = φ(x, a) + a − 1 − P2  with φ(x,a) = S1 + S2_hard ─────────
     let phi_x_a = (s1 + s2_hard) as u128;
@@ -80,7 +80,7 @@ pub fn prime_pi_dr_meissel_v4(x: u128) -> u128 {
 
 /// Timed variant of [`prime_pi_dr_meissel_v4`].
 /// Returns (result, [step1_sieve, step2_s1, step3_s2_hard_plus_p2, 0, 0]).
-pub fn prime_pi_dr_meissel_v4_timed(x: u128) -> (u128, [std::time::Duration; 5]) {
+pub fn prime_pi_dr_meissel_v4_timed(x: u128) -> (u128, [std::time::Duration; 5], hard::HardProfile) {
     use crate::math::{icbrt, isqrt};
     use crate::phi::s1_ordinary;
     use crate::segment::primes_up_to;
@@ -90,7 +90,7 @@ pub fn prime_pi_dr_meissel_v4_timed(x: u128) -> (u128, [std::time::Duration; 5])
     let mut times = [std::time::Duration::ZERO; 5];
 
     if x < 2 {
-        return (0, times);
+        return (0, times, hard::HardProfile::default());
     }
 
     let alpha: f64 = crate::parameters::choose_alpha(x);
@@ -112,7 +112,7 @@ pub fn prime_pi_dr_meissel_v4_timed(x: u128) -> (u128, [std::time::Duration; 5])
     if a <= C {
         // Small-x fallback does not surface step timings.
         let result = crate::baseline::prime_pi(x);
-        return (result, times);
+        return (result, times, hard::HardProfile::default());
     }
 
     // step2: S1 (ordinary DFS)
@@ -122,12 +122,12 @@ pub fn prime_pi_dr_meissel_v4_timed(x: u128) -> (u128, [std::time::Duration; 5])
 
     // step3: S2_hard + P2 combined
     let t2 = Instant::now();
-    let (s2_hard, p2) = hard::s2_hard_sieve_par(x, y, z, C, b_max, a, &seed_primes, s2_primes);
+    let (s2_hard, p2, profile) = hard::s2_hard_sieve_par(x, y, z, C, b_max, a, &seed_primes, s2_primes);
     times[2] = t2.elapsed();
 
     let phi_x_a = (s1 + s2_hard) as u128;
     let result = phi_x_a + a as u128 - 1 - p2;
-    (result, times)
+    (result, times, profile)
 }
 
 #[cfg(test)]

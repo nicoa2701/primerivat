@@ -290,12 +290,34 @@ fn run_dr_meissel4_profile(x: u128, _threads: usize) {
         fmt_thousands(x)
     );
 
-    let (result, times) = dr::prime_pi_dr_meissel_v4_timed(x);
+    let (result, times, profile) = dr::prime_pi_dr_meissel_v4_timed(x);
     let total: std::time::Duration = times[..4].iter().sum();
 
     let labels = ["sieve      ", "S1 DFS     ", "S2_hard    ", "P2         "];
     for (i, (&t, &lbl)) in times[..4].iter().zip(labels.iter()).enumerate() {
         println!("  step{} ({lbl})  {}", i + 1, fmt_elapsed(t));
+    }
+    // Sub-decomposition of step3 (CPU time summed across Rayon bands; %
+    // is relative to the total CPU time in S2_hard, not wall time).
+    let sub = [
+        ("p1 counted X    ", profile.p1_counted_ns),
+        ("p1 plain+bulk X ", profile.p1_plain_bulk_ns),
+        ("p1 fill+count   ", profile.p1_fill_count_ns),
+        ("p2 fill+count   ", profile.p2_fill_ns),
+        ("p2 bi main loop ", profile.p2_bi_main_ns),
+        ("p2 cross-off    ", profile.p2_cross_rest_ns),
+        ("p2 tail ext+P2  ", profile.p2_tail_ns),
+    ];
+    let cpu_ns_total: u64 = sub.iter().map(|(_, ns)| *ns).sum();
+    if cpu_ns_total > 0 {
+        println!("    ┌─ S2_hard CPU-time decomposition (sum over {} bands) ─",
+                 rayon::current_num_threads());
+        for (lbl, ns) in sub.iter() {
+            let pct = 100.0 * (*ns as f64) / (cpu_ns_total as f64);
+            let ms  = (*ns as f64) / 1_000_000.0;
+            println!("    │  {}  {:>9.1} ms   {:>5.1} %", lbl, ms, pct);
+        }
+        println!("    └─ total CPU              {:>9.1} ms", (cpu_ns_total as f64) / 1_000_000.0);
     }
     println!("  total              {}", fmt_elapsed(total));
     println!("  π({}) = {}", fmt_thousands(x), fmt_thousands(result));
