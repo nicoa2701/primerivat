@@ -155,17 +155,19 @@ rivat3::prime_pi_with_threads(x, threads)
 # Direct computation (the DR v4 engine manages its own Rayon parallelism)
 cargo run --release -- 1e13
 
+# Batch: multiple x in a single invocation (prints a summary table)
+cargo run --release -- 1e11 1e12 1e13 1e14
+
 # Override the auto-selected α (short or long form)
 cargo run --release -- 1e17 -a 2
 cargo run --release -- 1e13 --alpha 1
 
 # Profiling
-cargo run --release -- --profile 1e11     # baseline phase profile
-cargo run --release -- --dr-profile 1e13  # DR phase profile
+cargo run --release -- --dr-profile 1e13  # DR v4 step timings
 cargo run --release -- --lucy-profile 1e13
 
-# Multi-x sweep
-cargo run --release -- --sweep 1e12
+# Decade sweep up to x_max (default 1e12)
+cargo run --release -- --sweep 1e14
 ```
 
 ## Validation

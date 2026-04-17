@@ -156,20 +156,22 @@ rivat3::prime_pi_with_threads(x, threads)
 ## CLI
 
 ```bash
-# Calcul direct (le moteur DR v4 gère son propre parallélisme Rayon)
+# Calcul direct (le moteur DR v4 gère son propre pool Rayon)
 cargo run --release -- 1e13
+
+# Batch : plusieurs x dans un seul appel (tableau récapitulatif à la fin)
+cargo run --release -- 1e11 1e12 1e13 1e14
 
 # Surcharger l'α sélectionné automatiquement (forme courte ou longue)
 cargo run --release -- 1e17 -a 2
 cargo run --release -- 1e13 --alpha 1
 
 # Profilage
-cargo run --release -- --profile 1e11     # profil de phase baseline
-cargo run --release -- --dr-profile 1e13  # profil de phase DR
+cargo run --release -- --dr-profile 1e13  # timings par étape du moteur v4
 cargo run --release -- --lucy-profile 1e13
 
-# Sweep multi-x
-cargo run --release -- --sweep 1e12
+# Sweep par puissance de 10 jusqu'à x_max (défaut 1e12)
+cargo run --release -- --sweep 1e14
 ```
 
 ## Validation

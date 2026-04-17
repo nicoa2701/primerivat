@@ -72,23 +72,6 @@ fn parse_threads(s: &str) -> Result<usize, String> {
     }
 }
 
-fn parse_nt_batch_job(s: &str) -> Result<NtBatchJob, String> {
-    let (x_raw, threads_raw) = s
-        .split_once(',')
-        .ok_or_else(|| format!("'{s}' must use the form <x,threads> after -nt"))?;
-    let label = x_raw.trim();
-    if label.is_empty() {
-        return Err("missing x before comma in -nt <x,threads>".to_string());
-    }
-    let x = parse_x(label)?;
-    let threads = parse_threads(threads_raw.trim())?;
-    Ok(NtBatchJob {
-        label: label.to_string(),
-        x,
-        threads,
-    })
-}
-
 fn parse_hard_leaf_term_max(s: &str) -> Result<u128, String> {
     match s.parse::<u128>() {
         Ok(v) if v >= 2 => Ok(v),
@@ -125,7 +108,7 @@ fn mode_reference_x(mode: &Mode) -> Option<u128> {
         | Mode::DrMeissel4Profile { x }
         | Mode::LucyProfile { x } => Some(*x),
         Mode::Sweep { x_max } => Some(*x_max),
-        Mode::NtBatch { jobs } => jobs.iter().map(|j| j.x).max(),
+        Mode::Batch { jobs } => jobs.iter().map(|j| j.x).max(),
     }
 }
 
@@ -154,10 +137,9 @@ fn pct(part: std::time::Duration, total: std::time::Duration) -> f64 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct NtBatchJob {
+struct BatchJob {
     label: String,
     x: u128,
-    threads: usize,
 }
 
 struct Cli {
@@ -174,7 +156,7 @@ struct Cli {
 
 enum Mode {
     Normal { label: String, x: u128 },
-    NtBatch { jobs: Vec<NtBatchJob> },
+    Batch { jobs: Vec<BatchJob> },
     DrMeissel4Profile { x: u128 },
     LucyProfile { x: u128 },
     Sweep { x_max: u128 },
@@ -187,7 +169,7 @@ enum ExperimentalMode {
 
 fn parse_cli(args: &[String]) -> Result<Cli, String> {
     let mut threads = default_threads();
-    let mut nt_batch_jobs = Vec::new();
+    let mut positional_jobs: Vec<BatchJob> = Vec::new();
     let mut hard_leaf_term_max = rivat3::parameters::Parameters::DEFAULT_HARD_LEAF_TERM_MAX;
     let mut easy_leaf_term_max = rivat3::parameters::Parameters::DEFAULT_EASY_LEAF_TERM_VALUE;
     let experimental_mode = ExperimentalMode::None;
@@ -205,18 +187,6 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
                     .ok_or_else(|| "missing value after -t".to_string())?;
                 threads = parse_threads(value)?;
                 _used_t_flag = true;
-                i += 2;
-            }
-            "-nt" => {
-                let value = args
-                    .get(i + 1)
-                    .ok_or_else(|| "missing value after -nt".to_string())?;
-                _used_non_t_option = true;
-                if value.contains(',') {
-                    nt_batch_jobs.push(parse_nt_batch_job(value)?);
-                } else {
-                    threads = parse_threads(value)?;
-                }
                 i += 2;
             }
             "-a" | "--alpha" => {
@@ -275,33 +245,28 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
                 return Err(format!("unknown option: {}", other));
             }
             other => {
-                if !nt_batch_jobs.is_empty() {
-                    return Err(
-                        "cannot mix positional x with -nt <x,threads> batch mode".to_string()
-                    );
-                }
                 let x = parse_x(other)?;
-                mode = Some(Mode::Normal {
-                    label: other.to_string(),
-                    x,
-                });
+                positional_jobs.push(BatchJob { label: other.to_string(), x });
                 i += 1;
             }
         }
     }
 
-    let mode = if !nt_batch_jobs.is_empty() {
+    let mode = if !positional_jobs.is_empty() {
         if mode.is_some() {
             return Err(
-                "cannot combine -nt <x,threads> batch mode with another explicit mode".to_string(),
+                "cannot combine positional x values with another explicit mode".to_string(),
             );
         }
-        Mode::NtBatch {
-            jobs: nt_batch_jobs,
+        if positional_jobs.len() == 1 {
+            let job = positional_jobs.into_iter().next().unwrap();
+            Mode::Normal { label: job.label, x: job.x }
+        } else {
+            Mode::Batch { jobs: positional_jobs }
         }
     } else {
         mode.ok_or_else(|| {
-            "missing x or mode (--profile / --dr-profile / --sweep / -nt <x,threads>)".to_string()
+            "missing x or mode (--dr-profile / --lucy-profile / --sweep)".to_string()
         })?
     };
     if easy_leaf_term_max > hard_leaf_term_max {
@@ -336,9 +301,9 @@ fn run_dr_meissel4_profile(x: u128, _threads: usize) {
     println!("  π({}) = {}", fmt_thousands(x), fmt_thousands(result));
 }
 
-fn run_nt_batch(jobs: &[NtBatchJob]) {
+fn run_batch(jobs: &[BatchJob]) {
     #[derive(Clone)]
-    struct NtBatchResult {
+    struct BatchResult {
         label: String,
         x: u128,
         result: u128,
@@ -373,7 +338,7 @@ fn run_nt_batch(jobs: &[NtBatchJob]) {
         );
         println!();
 
-        results.push(NtBatchResult {
+        results.push(BatchResult {
             label: job.label.clone(),
             x: job.x,
             result,
@@ -454,14 +419,12 @@ fn run_sweep(x_max: u128, _threads: usize) {
 
 fn print_usage(program: &str) {
     eprintln!("Usage:");
-    eprintln!("  {} <x>                   Compute π(x)", program);
-    eprintln!("  {} -nt <x,threads>...    Batch: compute π for several x", program);
+    eprintln!("  {} <x> [<x> ...]         Compute π(x) (batch mode when >1 x given)", program);
     eprintln!("  {} --sweep [x_max]       Sweep x = 10, 100, … up to x_max (default 1e12)", program);
     eprintln!("  {} --dr-profile <x>      Timing breakdown for π(x) via the DR engine", program);
     eprintln!("  {} --lucy-profile <x>    Timing breakdown for π(x) via the Lucy baseline", program);
     eprintln!();
     eprintln!("Options:");
-    eprintln!("  -t <n>             Rayon thread budget hint (managed by the DR engine).");
     eprintln!("  -a <α>, --alpha <α>");
     eprintln!("                     Override the hardware-adaptive α selection.");
     eprintln!("                     α ∈ [1, 2] for x ≤ 1e15; α ∈ {{1, 2}} only for x > 1e15.");
@@ -469,7 +432,7 @@ fn print_usage(program: &str) {
     eprintln!("Examples:");
     eprintln!("  {} 1e13", program);
     eprintln!("  {} 1e17 --alpha 2", program);
-    eprintln!("  {} -nt 1e13,4 -nt 1e14,8", program);
+    eprintln!("  {} 1e11 1e12 1e13 1e14", program);
     eprintln!("  {} --sweep 1e14", program);
 }
 
@@ -510,7 +473,7 @@ fn main() {
 
     match cli.mode {
         Mode::Sweep { x_max } => run_sweep(x_max, cli.threads),
-        Mode::NtBatch { jobs } => run_nt_batch(&jobs),
+        Mode::Batch { jobs } => run_batch(&jobs),
         Mode::DrMeissel4Profile { x } => {
             // Deep phi recursion at x>=1e14 needs a larger main-thread stack.
             let t = cli.threads;
