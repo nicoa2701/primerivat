@@ -75,7 +75,10 @@ The auto-selection can be overridden from the CLI with `-a <α>` or
 `--alpha <α>`. Accepted range:
 
 - `x ≤ 1e15` → any `α ∈ [1, 2]` (e.g. `1.5`)
-- `x > 1e15` → only `α ∈ {1, 2}` (intermediate values are rejected)
+- `x > 1e15` → only `α ∈ {1, 2}`
+
+Any value outside these bounds is logged as a warning and ignored — the
+engine falls back to the auto-selected α.
 
 > ⚠️ Only `α ∈ {1.0, 2.0}` is safe. Intermediate values (e.g. α = 1.25)
 > produce wrong results at specific `x` — root cause not yet identified.

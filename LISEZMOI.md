@@ -77,7 +77,10 @@ La sélection automatique peut être surchargée depuis la CLI via `-a <α>` ou
 `--alpha <α>`. Plage acceptée :
 
 - `x ≤ 1e15` → tout `α ∈ [1, 2]` (ex. `1,5`)
-- `x > 1e15` → seulement `α ∈ {1, 2}` (les valeurs intermédiaires sont rejetées)
+- `x > 1e15` → seulement `α ∈ {1, 2}`
+
+Toute valeur hors bornes déclenche un avertissement et est ignorée : le
+moteur retombe sur l'α sélectionné automatiquement.
 
 > ⚠️ Seul `α ∈ {1.0, 2.0}` est sûr. Les valeurs intermédiaires (ex. α = 1,25)
 > produisent des résultats faux pour certains `x` — cause non identifiée.

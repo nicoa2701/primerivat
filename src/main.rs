@@ -356,7 +356,13 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
                 let value = args
                     .get(i + 1)
                     .ok_or_else(|| format!("missing value after {}", flag))?;
-                alpha_override = Some(parse_alpha(value)?);
+                match parse_alpha(value) {
+                    Ok(v) => alpha_override = Some(v),
+                    Err(e) => eprintln!(
+                        "Warning: {} — alpha sera déterminé automatiquement",
+                        e
+                    ),
+                }
                 _used_non_t_option = true;
                 i += 2;
             }
@@ -5888,11 +5894,15 @@ fn main() {
     };
 
     if let Some(alpha) = cli.alpha_override {
-        if let Err(e) = validate_alpha_override(alpha, &cli.mode) {
-            eprintln!("Error: {}", e);
-            std::process::exit(1);
+        match validate_alpha_override(alpha, &cli.mode) {
+            Ok(()) => {
+                let _ = rivat3::parameters::set_alpha_override(alpha);
+            }
+            Err(e) => eprintln!(
+                "Warning: {} — alpha sera déterminé automatiquement",
+                e
+            ),
         }
-        let _ = rivat3::parameters::set_alpha_override(alpha);
     }
 
     match cli.mode {
@@ -6119,19 +6129,19 @@ mod tests {
     }
 
     #[test]
-    fn parse_cli_rejects_alpha_out_of_range() {
+    fn parse_cli_falls_back_to_auto_on_invalid_alpha() {
         for value in ["0", "0.5", "2.1", "3"] {
-            let res = parse_cli(&[
+            let cli = parse_cli(&[
                 "rivat3".to_string(),
                 "1e6".to_string(),
                 "--alpha".to_string(),
                 value.to_string(),
-            ]);
-            let err = match res {
-                Err(e) => e,
-                Ok(_) => panic!("expected error for alpha={value}"),
-            };
-            assert!(err.contains("between 1 and 2"), "msg was: {err}");
+            ])
+            .unwrap_or_else(|e| panic!("expected ok for alpha={value}, got err: {e}"));
+            assert!(
+                cli.alpha_override.is_none(),
+                "alpha={value} should fall back to auto",
+            );
         }
     }
 
