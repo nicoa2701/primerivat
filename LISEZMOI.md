@@ -21,20 +21,24 @@ de comparer plusieurs builds côte à côte.
 
 ## Performances mesurées
 
-Machine de référence : i5-9300H (4C/8T, 8 Mo L3, DDR4-2666), build release,
-multi-thread, α adaptatif.
+Build release, multi-thread, α adaptatif. Deux machines de référence :
 
-| x | temps | π(x) |
-|---|---:|---|
-| `1e11` | 0,016 s | 4 118 054 813 |
-| `1e13` | 0,30 s  | 346 065 536 839 |
-| `1e15` | 7,1 s   | 29 844 570 422 669 |
-| `1e16` | 37,7 s  | 279 238 341 033 925 |
-| `1e17` | 193 s (α=2) | 2 623 557 157 654 233 |
+- **i5-9300H** — 4C/8T, 8 Mo L3, DDR4-2666 (Coffee Lake, 2019)
+- **i5-13450HX** — 6P+4E / 12T, 20 Mo L3, DDR5 (Raptor Lake, 2023)
 
-Ces chiffres sont nettement en dessous des cibles de la roadmap initiale —
-les gains futurs viendront probablement d'ajustements cache/SIMD plutôt que
-d'algorithmique.
+| x | i5-9300H | i5-13450HX | π(x) |
+|---|---:|---:|---|
+| `1e11` | 0,018 s | 0,012 s | 4 118 054 813 |
+| `1e13` | 0,25 s  | 0,11 s  | 346 065 536 839 |
+| `1e15` | 5,94 s  | 1,98 s  | 29 844 570 422 669 |
+| `1e16` | 31,7 s  | 9,20 s  | 279 238 341 033 925 |
+| `1e17` | 185 s (α=2) | 48,3 s (α=1) | 2 623 557 157 654 233 |
+| `1e18` | —       | 303 s   | 24 739 954 287 740 860 |
+
+Chiffres pour le commit `faf8a77` (scan monotone des leaves en Pass 2). Par
+rapport à la baseline d'origine, cela gagne ~16 % sur le sweep S2_hard entre
+1e13 et 1e16, et ~13 % à 1e18. Les gains suivants devraient venir de SIMD ou
+des chemins ext-easy / P2, qui dominent le runtime à très grand `x`.
 
 ## Algorithme
 
@@ -58,8 +62,8 @@ avec `a = π(y)`, `y = α·∛x`, et :
 
 | Plage `bi` | Plage `p_b` | Chemin | Formule pour `φ(n, b−1)` |
 |---|---|---|---|
-| `0..n_hard` | ≤ √y | hard leaves | `phi_vec` + popcount crible segmenté |
-| `n_hard..b_ext` | (√y, x¹ᐟ⁴] | `phi_easy` (`m = p_l`) | `phi_vec` + popcount crible segmenté |
+| `0..n_hard` | ≤ √y | hard leaves | `phi_vec` + curseur popcount monotone |
+| `n_hard..b_ext` | (√y, x¹ᐟ⁴] | `phi_easy` (`m = p_l`) | `phi_vec` + curseur popcount monotone |
 | `b_ext..n_all` | (x¹ᐟ⁴, y] | `ext_easy` (`m = p_l`) | forme fermée `π(n) − (b−2)` (clamp ≥ 1) |
 
 La forme fermée `ext_easy` `φ(n, b−1) = π(n) − (b−2)` est valide lorsque
@@ -67,11 +71,15 @@ La forme fermée `ext_easy` `φ(n, b−1) = π(n) − (b−2)` est valide lorsqu
 
 ### α adaptatif
 
-`y = α·∛x` avec α choisi selon l'ordre de grandeur de `x` :
+`y = α·∛x` avec α choisi selon l'ordre de grandeur de `x` **et le matériel** :
 
 - `x < 3e16` → α = 1,0 (overhead plus faible pour les petits `x`)
-- `x ≥ 3e16` → α = 2,0 (~41% plus rapide à `1e17` grâce à moins de fenêtres
-  de crible)
+- `x ≥ 3e16` **et L3 < 16 Mo et ≤ 8 cœurs physiques** → α = 2,0
+  (~41 % plus rapide à `1e17` sur les CPU contraints par le cache, grâce à
+  moins de fenêtres de crible)
+- `x ≥ 3e16` sur un CPU plus large (L3 ≥ 16 Mo, ex. desktop / HX) → α = 1,0
+  (le L3 plus gros absorbe les fenêtres supplémentaires, α = 1 devient plus
+  rapide)
 
 La sélection automatique peut être surchargée depuis la CLI via `-a <α>` ou
 `--alpha <α>`. Plage acceptée :
@@ -173,15 +181,20 @@ Valeurs de référence vérifiées :
 
 1. **Sens du sweep** — ascendant, de `lo_start` vers `z`. `phi_vec[bi]` stocke
    `φ(lo − 1, b − 1)` et est mis à jour à la fin de chaque fenêtre.
-2. **Crible bucket** — dans le cross-off de masse pour les primes `≥ x¹ᐟ⁴`,
+2. **Scan monotone des leaves** — pour un `bi` donné, les leaves arrivent par
+   `n` croissant. Un curseur `MonoCount` garde le popcount cumulé en cours et
+   chaque requête ne popcount que les mots u64 traversés depuis la leaf
+   précédente. Remplace le `fill_prefix_counts` (balayage complet de ~2 185
+   mots) qui s'exécutait une fois par bi avec leaves.
+3. **Crible bucket** — dans le cross-off de masse pour les primes `≥ x¹ᐟ⁴`,
    les primes tels que `p² > hi` sont skippés : toute composite dans
    `[lo, hi)` admet un facteur `≤ √hi`.
-3. **Correction seed** — pour `lo < y`, les primes seed dans `[lo, hi)` sont
+4. **Correction seed** — pour `lo < y`, les primes seed dans `[lo, hi)` sont
    crossés comme multiples d'eux-mêmes puis réinjectés via `seed_in_seg` /
    `seed_in_query`.
-4. **Clamp `ext_easy`** — `φ(n, b−1)` est clampé à `≥ 1` quand
+5. **Clamp `ext_easy`** — `φ(n, b−1)` est clampé à `≥ 1` quand
    `n < p_{b−1}`.
-5. **Garde petits x** — `if a ≤ C { return baseline::prime_pi(x) }`.
+6. **Garde petits x** — `if a ≤ C { return baseline::prime_pi(x) }`.
 
 ## Référence
 

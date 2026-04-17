@@ -21,19 +21,24 @@ builds can be compared side by side.
 
 ## Measured performance
 
-Reference machine: i5-9300H (4C/8T, 8 MB L3, DDR4-2666), release build,
-multi-threaded, adaptive α.
+Release build, multi-threaded, adaptive α. Two reference machines:
 
-| x | time | π(x) |
-|---|---:|---|
-| `1e11` | 0.016 s | 4 118 054 813 |
-| `1e13` | 0.30 s  | 346 065 536 839 |
-| `1e15` | 7.1 s   | 29 844 570 422 669 |
-| `1e16` | 37.7 s  | 279 238 341 033 925 |
-| `1e17` | 193 s (α=2) | 2 623 557 157 654 233 |
+- **i5-9300H** — 4C/8T, 8 MB L3, DDR4-2666 (Coffee Lake, 2019)
+- **i5-13450HX** — 6P+4E cores / 12T, 20 MB L3, DDR5 (Raptor Lake, 2023)
 
-These numbers are well below the original roadmap targets — further gains are
-expected to come from cache/SIMD tuning rather than algorithmic changes.
+| x | i5-9300H | i5-13450HX | π(x) |
+|---|---:|---:|---|
+| `1e11` | 0.018 s | 0.012 s | 4 118 054 813 |
+| `1e13` | 0.25 s  | 0.11 s  | 346 065 536 839 |
+| `1e15` | 5.94 s  | 1.98 s  | 29 844 570 422 669 |
+| `1e16` | 31.7 s  | 9.20 s  | 279 238 341 033 925 |
+| `1e17` | 185 s (α=2) | 48.3 s (α=1) | 2 623 557 157 654 233 |
+| `1e18` | —       | 303 s   | 24 739 954 287 740 860 |
+
+Numbers are for commit `faf8a77` (monotonic leaf scan in Pass 2). Compared to
+the original baseline, this shaves ~16 % off the S2_hard sweep at 1e13–1e16
+and ~13 % at 1e18. Further gains would need SIMD or work on the ext-easy /
+P2 paths, which dominate the runtime at very large `x`.
 
 ## Algorithm
 
@@ -57,8 +62,8 @@ with `a = π(y)`, `y = α·∛x`, and:
 
 | `bi` range | `p_b` range | Path | Formula for `φ(n, b−1)` |
 |---|---|---|---|
-| `0..n_hard` | ≤ √y | hard leaves | `phi_vec` + segmented sieve popcount |
-| `n_hard..b_ext` | (√y, x¹ᐟ⁴] | `phi_easy` (`m = p_l`) | `phi_vec` + segmented sieve popcount |
+| `0..n_hard` | ≤ √y | hard leaves | `phi_vec` + monotonic popcount cursor |
+| `n_hard..b_ext` | (√y, x¹ᐟ⁴] | `phi_easy` (`m = p_l`) | `phi_vec` + monotonic popcount cursor |
 | `b_ext..n_all` | (x¹ᐟ⁴, y] | `ext_easy` (`m = p_l`) | closed form `π(n) − (b−2)` (clamped ≥ 1) |
 
 The `ext_easy` closed form `φ(n, b−1) = π(n) − (b−2)` is valid when
@@ -66,10 +71,13 @@ The `ext_easy` closed form `φ(n, b−1) = π(n) − (b−2)` is valid when
 
 ### Adaptive α
 
-`y = α·∛x` with α chosen per magnitude of `x`:
+`y = α·∛x` with α chosen per magnitude of `x` **and hardware**:
 
 - `x < 3e16` → α = 1.0 (lower overhead for small `x`)
-- `x ≥ 3e16` → α = 2.0 (~41% faster at `1e17` thanks to fewer sieve windows)
+- `x ≥ 3e16` **and L3 < 16 MB and ≤ 8 physical cores** → α = 2.0
+  (~41 % faster at `1e17` thanks to fewer sieve windows on cache-constrained CPUs)
+- `x ≥ 3e16` on larger CPUs (L3 ≥ 16 MB, e.g. desktop/HX parts) → α = 1.0
+  (the bigger L3 absorbs the extra sieve windows, so α = 1 is faster there)
 
 The auto-selection can be overridden from the CLI with `-a <α>` or
 `--alpha <α>`. Accepted range:
@@ -169,13 +177,18 @@ Reference values checked:
 
 1. **Sweep direction** — ascending, from `lo_start` up to `z`. `phi_vec[bi]`
    holds `φ(lo − 1, b − 1)` and is updated at the end of each window.
-2. **Bucket sieve** — in the bulk cross-off for primes `≥ x¹ᐟ⁴`, primes with
+2. **Monotonic leaf scan** — within a given `bi`, leaves arrive in ascending
+   `n`. A `MonoCount` cursor caches the running popcount frontier so each
+   leaf query only popcounts the u64 words newly traversed since the previous
+   leaf. Replaces the `fill_prefix_counts` full-sieve popcount sweep
+   (~2 185 words per call) that used to run once per bi with leaves.
+3. **Bucket sieve** — in the bulk cross-off for primes `≥ x¹ᐟ⁴`, primes with
    `p² > hi` are skipped: any composite in `[lo, hi)` has a factor `≤ √hi`.
-3. **Seed correction** — for `lo < y`, seed primes in `[lo, hi)` are crossed
+4. **Seed correction** — for `lo < y`, seed primes in `[lo, hi)` are crossed
    off as multiples of themselves and re-added via `seed_in_seg` /
    `seed_in_query`.
-4. **`ext_easy` clamp** — `φ(n, b−1)` is clamped to `≥ 1` when `n < p_{b−1}`.
-5. **Small-x guard** — `if a ≤ C { return baseline::prime_pi(x) }`.
+5. **`ext_easy` clamp** — `φ(n, b−1)` is clamped to `≥ 1` when `n < p_{b−1}`.
+6. **Small-x guard** — `if a ≤ C { return baseline::prime_pi(x) }`.
 
 ## Reference
 
