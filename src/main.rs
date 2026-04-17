@@ -300,13 +300,11 @@ fn run_dr_meissel4_profile(x: u128, _threads: usize) {
     // Sub-decomposition of step3 (CPU time summed across Rayon bands; %
     // is relative to the total CPU time in S2_hard, not wall time).
     let sub = [
-        ("p1 counted X    ", profile.p1_counted_ns),
-        ("p1 plain+bulk X ", profile.p1_plain_bulk_ns),
-        ("p1 fill+count   ", profile.p1_fill_count_ns),
-        ("p2 fill+count   ", profile.p2_fill_ns),
-        ("p2 bi main loop ", profile.p2_bi_main_ns),
-        ("p2 cross-off    ", profile.p2_cross_rest_ns),
-        ("p2 tail ext+P2  ", profile.p2_tail_ns),
+        ("sweep fill+count", profile.sweep_fill_ns),
+        ("sweep bi main   ", profile.sweep_bi_main_ns),
+        ("sweep cross-off ", profile.sweep_cross_rest_ns),
+        ("sweep tail ext+P2", profile.sweep_tail_ns),
+        ("resolve records ", profile.resolve_ns),
     ];
     let cpu_ns_total: u64 = sub.iter().map(|(_, ns)| *ns).sum();
     if cpu_ns_total > 0 {
