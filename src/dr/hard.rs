@@ -250,7 +250,77 @@ pub fn s2_hard_sieve_par(
     let num_bands     = (rayon::current_num_threads() * crate::parameters::band_mult())
         .min(num_segs)
         .max(1);
-    let segs_per_band = (num_segs + num_bands - 1) / num_bands;
+
+    // ── Bulk clamp-leaf count (Piste 3, computed early so band_bounds can
+    // key the log-scale decision on it). An ext-easy leaf (p_b, p_l) produces
+    // φ(n, b-1) = 1 iff n < p_{b-1}, i.e. p_l > x/(p_b·p_{b-1}). Skipping
+    // these leaves is handled in the sweep via a pl_idx cap in init_easy.
+    let far_easy_start = n_ext_easy; // ei >= far_easy_start use pi-formula
+    let total_clamp_count: i64 = (far_easy_start..n_easy)
+        .map(|ei| {
+            let bi = n_hard + ei;
+            let b = bi + c + 1;
+            if b >= a || b < 2 { return 0i64; }
+            let pb = primes[b - 1] as u128;
+            let pbm1 = primes[b - 2] as u128;
+            let pl_clamp_threshold = (x / (pb * pbm1)) as u64;
+            let nonclamp_cnt = primes[b..a]
+                .partition_point(|&p| p <= pl_clamp_threshold);
+            let upper_cnt = if lo_start == 0 {
+                a - b
+            } else {
+                let pl_upper = (x / (pb * lo_start as u128)) as u64;
+                primes[b..a].partition_point(|&p| p <= pl_upper)
+            };
+            upper_cnt.saturating_sub(nonclamp_cnt) as i64
+        })
+        .sum();
+
+    // ── Band boundaries ──────────────────────────────────────────────────────
+    // Default: uniform partitioning, which distributes cross-off work evenly
+    // and gives the best Rayon scaling whenever cross-off dominates.
+    //
+    // Opt-in to log-scale ONLY when the α=2 clamp path is active (measured by
+    // total_clamp_count > 0). In that regime ext-easy leaves funnel into the
+    // first √x of [lo_start, z] and uniform bands stall Rayon scaling. Log
+    // bands pack narrow bins near low n and wider bins past √x. Outside of
+    // α=2 the log layout makes the last band carry thousands of segments of
+    // pure cross-off and REGRESSES wall (-30 % at 1e15 α=1 in testing).
+    // Each bound is snapped to a W30_SEG multiple so the sieve stays valid.
+    let use_log_scale = total_clamp_count > 0 && num_bands > 1;
+    let w_seg = W30_SEG as u64;
+    let hi_cap = ((z / w_seg) + 1) * w_seg; // first W30_SEG multiple > z
+    let band_bounds: Vec<u64> = {
+        let mut bounds = Vec::with_capacity(num_bands + 1);
+        bounds.push(lo_start);
+        if num_bands == 1 {
+            bounds.push(hi_cap);
+        } else if !use_log_scale {
+            // Uniform (matches pre-Piste-1 behaviour exactly).
+            let segs_per_band = (num_segs + num_bands - 1) / num_bands;
+            for t in 1..num_bands {
+                let b = lo_start + (t * segs_per_band) as u64 * w_seg;
+                bounds.push(b.min(hi_cap));
+            }
+            bounds.push(hi_cap);
+        } else {
+            // Log-scale from w_seg to hi_cap across num_bands-1 internal
+            // boundaries (band 0 spans [0, w_seg)).
+            let log_lo = (w_seg as f64).ln();
+            let log_hi = (hi_cap as f64).ln();
+            let dlog   = (log_hi - log_lo) / (num_bands - 1) as f64;
+            let mut prev = 0u64;
+            for t in 1..num_bands {
+                let target = (log_lo + dlog * (t - 1) as f64).exp() as u64;
+                let aligned = (target / w_seg) * w_seg;
+                let next_b  = aligned.max(prev + w_seg).min(hi_cap);
+                bounds.push(next_b);
+                prev = next_b;
+            }
+            bounds.push(hi_cap);
+        }
+        bounds
+    };
 
     // ── Initial phi_vec at lo_start ───────────────────────────────────────────
     // Only need b_ext entries: bi >= b_ext use the pi-formula, not phi_vec.
@@ -308,9 +378,8 @@ pub fn s2_hard_sieve_par(
     //   q_k < band_hi  ↔  p_k > x/band_hi   ↔  index ≥ start
     let p2_ranges: Vec<(usize, usize)> = (0..num_bands)
         .map(|t| {
-            let band_lo = lo_start + (t * segs_per_band) as u64 * W30_SEG as u64;
-            let band_hi = (lo_start + ((t + 1) * segs_per_band) as u64 * W30_SEG as u64)
-                          .min(z + W30_SEG as u64);
+            let band_lo = band_bounds[t];
+            let band_hi = band_bounds[t + 1].min(z + W30_SEG as u64);
             let end   = if band_lo == 0 { s2_primes.len() } else {
                 s2_primes.partition_point(|&p| (x / p as u128) as u64 >= band_lo)
             };
@@ -377,9 +446,6 @@ pub fn s2_hard_sieve_par(
         local_p2: i64,
     }
 
-    // far_easy_start: index into easy_ptrs/easy_next_n where ext-easy leaves begin
-    let far_easy_start = n_ext_easy; // ei >= far_easy_start use pi-formula
-
     // Per-band safe lower bound on p2_band_inits[t], used to widen the
     // ext-easy fold condition. Dusart (1999): π(n) ≥ n/ln(n) for n ≥ 5393.
     // We use that as a rigorous lower bound for p2_band_inits[t] = π(band_lo[t]−1).
@@ -395,7 +461,7 @@ pub fn s2_hard_sieve_par(
     };
     let p2_init_lb_per_band: Vec<i64> = (0..num_bands)
         .map(|t| {
-            let band_lo = lo_start + (t * segs_per_band) as u64 * W30_SEG as u64;
+            let band_lo = band_bounds[t];
             // p2_band_inits[t] = π(band_lo - 1). Use π(band_lo) as a safe
             // lower bound (π is monotone and π(n-1) ≤ π(n)).
             // Actually we want a lower bound on π(band_lo - 1), so use
@@ -406,42 +472,8 @@ pub fn s2_hard_sieve_par(
         })
         .collect();
 
-    // ── Bulk clamp-leaf count (Piste 3) ──────────────────────────────────────
-    // An ext-easy leaf (p_b, p_l) produces φ(n, b-1) = 1 (clamped by the
-    // `max(·, 1)` guard) iff n = x/(p_b·p_l) < p_{b-1}, i.e. p_l > x/(p_b·p_{b-1}).
-    // These leaves contribute +1 each to S2 — the full per-leaf emission path
-    // (sieve popcount + arithmetic) adds nothing beyond a count.
-    //
-    // We pre-compute the total clamp count via binary search over `primes`
-    // (O(n_easy·log a), trivial) and skip these leaves during the hot sweep by
-    // capping the initial pl_idx in `init_easy` below. The count is added to
-    // S2 at resolve time.
-    //
-    // At α=1 every ext-easy leaf satisfies n ≥ p_{b-1} (see bug_alpha2_fix.md),
-    // so total_clamp_count = 0 and the cap is a no-op. At α=2 the clamp path
-    // dominates the tail (≈808 M leaves at x=1e17); skipping them is where
-    // this piste pays.
-    let total_clamp_count: i64 = (far_easy_start..n_easy)
-        .map(|ei| {
-            let bi = n_hard + ei;
-            let b = bi + c + 1;
-            if b >= a || b < 2 { return 0i64; }
-            let pb = primes[b - 1] as u128;
-            let pbm1 = primes[b - 2] as u128;
-            // pl with pl > x/(pb*p_{b-1}) ⇒ n < p_{b-1} ⇒ clamp fires.
-            let pl_clamp_threshold = (x / (pb * pbm1)) as u64;
-            let nonclamp_cnt = primes[b..a]
-                .partition_point(|&p| p <= pl_clamp_threshold);
-            // Intersect with n ≥ lo_start (pl ≤ x/(pb*lo_start) when lo_start>0).
-            let upper_cnt = if lo_start == 0 {
-                a - b
-            } else {
-                let pl_upper = (x / (pb * lo_start as u128)) as u64;
-                primes[b..a].partition_point(|&p| p <= pl_upper)
-            };
-            upper_cnt.saturating_sub(nonclamp_cnt) as i64
-        })
-        .sum();
+    // (total_clamp_count + far_easy_start are computed earlier — they feed
+    // the band_bounds log-scale decision.)
 
     // ── Single parallel sweep per band: accumulate delta + p2_count AND
     // fold leaf contributions into compact band-local accumulators. ───────────
@@ -493,7 +525,7 @@ pub fn s2_hard_sieve_par(
             let mut ext_fold_count: i64         = 0;
             let mut ext_stored: Vec<ExtEasyRec> = Vec::new();
 
-            let band_lo = lo_start + (t * segs_per_band) as u64 * W30_SEG as u64;
+            let band_lo = band_bounds[t];
             if band_lo > z {
                 return (delta, p2_count, leaf_partial, bi_contrib,
                         p2_partial, p2_q_count,
@@ -501,8 +533,7 @@ pub fn s2_hard_sieve_par(
                         ext_stored,
                         stats);
             }
-            let band_hi = (lo_start + ((t + 1) * segs_per_band) as u64 * W30_SEG as u64)
-                .min(z + W30_SEG as u64);
+            let band_hi = band_bounds[t + 1].min(z + W30_SEG as u64);
 
             // Per-band easy iterator init. In addition to the band's n-range
             // cap (pl ≤ x/(pb*blo)), we also cap at the NON-CLAMP boundary
