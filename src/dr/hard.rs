@@ -331,16 +331,14 @@ pub fn s2_hard_sieve_par(
     //   final: p2_sum += p2_init * p2_count + p2_partial
     //
     //   Ext-easy HYBRID (non-linearity from `max(·, 1)`):
-    //     Three buckets per band:
+    //     Clamp leaves (n < p_{b-1}) are bulk-counted BEFORE the sweep and
+    //     added directly to S2 at resolve time (see `total_clamp_count` below);
+    //     the sweep skips them entirely by capping the pl iterator at
+    //     pl ≤ x/(pb·p_{b-1}). Of the remaining (non-clamp) leaves:
     //       · fold bucket     : v ≥ b-1-band_fold_floor → pi_n ≥ b-1 guaranteed
     //                            → contribution (p2_init + v - (b-2))
-    //       · clamp bucket    : p2_init[t] known exactly AND p2_init[t] + v < b-1
-    //                            → max fires, contribution = 1
-    //       · stored records  : t > 0, uncertain at emit (Dusart LB too loose),
-    //                            classified at resolve-time.
-    //     For band 0, p2_init[0] == initial_p2_offset is known precisely, so
-    //     the classification is exact and ext_stored stays empty — critical at
-    //     large x where lo_start = 0 funnels every ext-easy leaf into band 0.
+    //       · stored records  : t > 0 with Dusart LB too loose → classified at
+    //                            resolve-time. In practice always empty.
     #[derive(Clone, Copy)]
     struct ExtEasyRec {
         b_minus_2: i32,
@@ -379,6 +377,43 @@ pub fn s2_hard_sieve_par(
         })
         .collect();
 
+    // ── Bulk clamp-leaf count (Piste 3) ──────────────────────────────────────
+    // An ext-easy leaf (p_b, p_l) produces φ(n, b-1) = 1 (clamped by the
+    // `max(·, 1)` guard) iff n = x/(p_b·p_l) < p_{b-1}, i.e. p_l > x/(p_b·p_{b-1}).
+    // These leaves contribute +1 each to S2 — the full per-leaf emission path
+    // (sieve popcount + arithmetic) adds nothing beyond a count.
+    //
+    // We pre-compute the total clamp count via binary search over `primes`
+    // (O(n_easy·log a), trivial) and skip these leaves during the hot sweep by
+    // capping the initial pl_idx in `init_easy` below. The count is added to
+    // S2 at resolve time.
+    //
+    // At α=1 every ext-easy leaf satisfies n ≥ p_{b-1} (see bug_alpha2_fix.md),
+    // so total_clamp_count = 0 and the cap is a no-op. At α=2 the clamp path
+    // dominates the tail (≈808 M leaves at x=1e17); skipping them is where
+    // this piste pays.
+    let total_clamp_count: i64 = (far_easy_start..n_easy)
+        .map(|ei| {
+            let bi = n_hard + ei;
+            let b = bi + c + 1;
+            if b >= a || b < 2 { return 0i64; }
+            let pb = primes[b - 1] as u128;
+            let pbm1 = primes[b - 2] as u128;
+            // pl with pl > x/(pb*p_{b-1}) ⇒ n < p_{b-1} ⇒ clamp fires.
+            let pl_clamp_threshold = (x / (pb * pbm1)) as u64;
+            let nonclamp_cnt = primes[b..a]
+                .partition_point(|&p| p <= pl_clamp_threshold);
+            // Intersect with n ≥ lo_start (pl ≤ x/(pb*lo_start) when lo_start>0).
+            let upper_cnt = if lo_start == 0 {
+                a - b
+            } else {
+                let pl_upper = (x / (pb * lo_start as u128)) as u64;
+                primes[b..a].partition_point(|&p| p <= pl_upper)
+            };
+            upper_cnt.saturating_sub(nonclamp_cnt) as i64
+        })
+        .sum();
+
     // ── Single parallel sweep per band: accumulate delta + p2_count AND
     // fold leaf contributions into compact band-local accumulators. ───────────
     type BandSweep = (
@@ -390,8 +425,7 @@ pub fn s2_hard_sieve_par(
         i64,                // p2_q_count              (number of P2 queries in band)
         i128,               // ext_fold_partial
         i64,                // ext_fold_count
-        i64,                // ext_clamped_count (band 0 only, max-fired)
-        Vec<ExtEasyRec>,    // ext_stored (uncertain, bands t>0 only)
+        Vec<ExtEasyRec>,    // ext_stored (fallback when band_fold_floor too loose)
         [u64; 4],           // phase timings
     );
 
@@ -415,7 +449,6 @@ pub fn s2_hard_sieve_par(
             // Ext-easy hybrid accumulators.
             let mut ext_fold_partial: i128      = 0;
             let mut ext_fold_count: i64         = 0;
-            let mut ext_clamped_count: i64      = 0;
             let mut ext_stored: Vec<ExtEasyRec> = Vec::new();
 
             let band_lo = lo_start + (t * segs_per_band) as u64 * W30_SEG as u64;
@@ -423,28 +456,42 @@ pub fn s2_hard_sieve_par(
                 return (delta, p2_count, leaf_partial, bi_contrib,
                         p2_partial, p2_q_count,
                         ext_fold_partial, ext_fold_count,
-                        ext_clamped_count, ext_stored,
+                        ext_stored,
                         [ns_fill, ns_bi, ns_rest, ns_tail]);
             }
             let band_hi = (lo_start + ((t + 1) * segs_per_band) as u64 * W30_SEG as u64)
                 .min(z + W30_SEG as u64);
 
-            // Per-band easy iterator init (same shape as the old Pass-2 init).
+            // Per-band easy iterator init. In addition to the band's n-range
+            // cap (pl ≤ x/(pb*blo)), we also cap at the NON-CLAMP boundary
+            // (pl ≤ x/(pb*p_{b-1})) so the hot sweep never iterates over
+            // leaves that would just increment ext_clamped_count. Those are
+            // bulk-counted in `total_clamp_count` above.
             let init_easy = |ei: usize, blo: u64| -> (usize, u64) {
                 let bi = n_hard + ei;
                 let b  = bi + c + 1;
-                if b >= a { return (a, u64::MAX); }
+                if b >= a || b < 2 { return (a, u64::MAX); }
                 let pb = primes[b - 1];
-                let pl_idx = if blo == 0 {
-                    if a > b { a - 1 } else { a }
+                let pbm1 = primes[b - 2];
+                // Band n-range constraint.
+                let band_cnt = if blo == 0 {
+                    a - b
                 } else {
                     let max_pl = (x / (pb as u128 * blo as u128)) as u64;
-                    let cnt = primes[b..a].partition_point(|&p| p <= max_pl);
-                    if cnt == 0 { a } else { b + cnt - 1 }
+                    primes[b..a].partition_point(|&p| p <= max_pl)
                 };
-                let next_n = if pl_idx < a {
-                    (x / (pb as u128 * primes[pl_idx] as u128)) as u64
-                } else { u64::MAX };
+                if band_cnt == 0 { return (a, u64::MAX); }
+                // Non-clamp constraint (pl ≤ x/(pb*p_{b-1})).
+                let pl_clamp_threshold =
+                    (x / (pb as u128 * pbm1 as u128)) as u64;
+                let nonclamp_cnt = primes[b..a]
+                    .partition_point(|&p| p <= pl_clamp_threshold);
+                if nonclamp_cnt == 0 { return (a, u64::MAX); }
+                // Take the stricter of the two caps. Both are counts of valid
+                // pl in primes[b..a]; pl_idx = b + min(cnt) - 1 is the largest
+                // valid pl.
+                let pl_idx = b + band_cnt.min(nonclamp_cnt) - 1;
+                let next_n = (x / (pb as u128 * primes[pl_idx] as u128)) as u64;
                 (pl_idx, next_n)
             };
 
@@ -650,24 +697,18 @@ pub fn s2_hard_sieve_par(
                                 - adj_lo as i64
                                 + seed_in_query as i64;
                             let b_m1 = (b as i64) - 1;
-                            // Classify each leaf into one of three buckets.
-                            // For band 0 the p2_init is known exactly
-                            // (= initial_p2_offset), so the classification is
-                            // precise and `ext_stored` stays empty.
-                            // For bands t > 0 we use `band_fold_floor` as a
-                            // rigorous lower bound on p2_init[t]: safe leaves
-                            // fold; the rest are stored for resolve-time
-                            // classification.
+                            // Piste 3 guarantees every emitted leaf satisfies
+                            // n ≥ p_{b-1} (clamps bulk-counted before sweep).
+                            // At band 0, band_fold_floor = p2_init[0] exactly,
+                            // so the fold check always succeeds. At bands t>0
+                            // a loose Dusart LB could theoretically force some
+                            // leaves into `ext_stored`, but in practice all
+                            // ext-easy leaves land in band 0 and this path is
+                            // never triggered.
                             if v >= b_m1 - band_fold_floor {
                                 ext_fold_partial +=
                                     (v - (b_m1 - 1)) as i128; // V - (b-2)
                                 ext_fold_count += 1;
-                            } else if t == 0 {
-                                // Exact: p2_init[0] = initial_p2_offset ≤
-                                // band_fold_floor, and we failed the fold
-                                // check, so p2_init[0] + v < b-1
-                                // ⇒ max clamps to 1.
-                                ext_clamped_count += 1;
                             } else {
                                 ext_stored.push(ExtEasyRec {
                                     b_minus_2: (b as i32) - 2,
@@ -736,7 +777,7 @@ pub fn s2_hard_sieve_par(
             (delta, p2_count, leaf_partial, bi_contrib,
              p2_partial, p2_q_count,
              ext_fold_partial, ext_fold_count,
-             ext_clamped_count, ext_stored,
+             ext_stored,
              [ns_fill, ns_bi, ns_rest, ns_tail])
         })
         .collect();
@@ -758,7 +799,7 @@ pub fn s2_hard_sieve_par(
     // ── Accumulate sweep-phase timings across bands.
     let mut sweep_phase_sums = [0u64; 4];
     for b in &band_sweeps {
-        for i in 0..4 { sweep_phase_sums[i] += b.10[i]; }
+        for i in 0..4 { sweep_phase_sums[i] += b.9[i]; }
     }
 
     // ── Resolution pass (parallel per band) ──────────────────────────────────
@@ -775,8 +816,7 @@ pub fn s2_hard_sieve_par(
             let p2_q_count        = band.5;
             let ext_fold_partial  = band.6;
             let ext_fold_count    = band.7;
-            let ext_clamped_count = band.8;
-            let ext_stored        = &band.9;
+            let ext_stored        = &band.8;
 
             // Leaf contribution (fully folded).
             let mut sum: i128 = leaf_partial;
@@ -785,9 +825,7 @@ pub fn s2_hard_sieve_par(
             }
             // Ext-easy folded part (max guaranteed not to fire).
             sum += (p2_init as i128) * (ext_fold_count as i128) + ext_fold_partial;
-            // Ext-easy clamped part (band 0 only): each contributes +1.
-            sum += ext_clamped_count as i128;
-            // Ext-easy may-clamp records (bands > 0): apply max(·, 1).
+            // Ext-easy may-clamp records (rare, bands > 0 only): apply max(·, 1).
             for rec in ext_stored.iter() {
                 let pi_n = p2_init + rec.local_p2
                     + rec.raw as i64
@@ -805,7 +843,10 @@ pub fn s2_hard_sieve_par(
         .collect();
     let ns_resolve = t_resolve.elapsed().as_nanos() as u64;
 
-    let s2_total: i128 = resolved.iter().map(|&(s, _)| s).sum();
+    // s2_total = per-band folded sums + bulk clamp count (+1 each).
+    let s2_total: i128 =
+        resolved.iter().map(|&(s, _)| s).sum::<i128>()
+        + total_clamp_count as i128;
     let p2_total: u128 = resolved.iter().map(|&(_, p)| p).sum();
 
     let profile = HardProfile {
