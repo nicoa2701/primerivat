@@ -4,20 +4,49 @@
 /// `num_threads × wall_time_of_s2_hard`.
 #[derive(Default, Clone, Debug)]
 pub struct HardProfile {
-    /// Single-pass sweep: sieve.fill_presieved_7_11 / sieve.fill + total_count
-    /// + seed_in_seg counting + wheel advance.
+    /// Single-pass sweep: sieve.fill_presieved_7_11 / sieve.fill + total_count.
     pub sweep_fill_ns: u64,
-    /// Single-pass sweep: bi ∈ [0, b_limit) — leaves + popcount cursor
-    /// + counted cross-off + delta accumulation.
+
+    /// bi ∈ [0, b_limit) main loop (counted cross-off + leaf emit, bundled).
+    /// Measured per segment, not per bi, to avoid Instant::now overhead on
+    /// the ~3.4 B inner iterations at x=1e17 α=2. Use `n_bi_leaf_hits`
+    /// together with `n_leaves_ext_emitted` to weigh the leaf vs xoff share.
     pub sweep_bi_main_ns: u64,
-    /// Single-pass sweep: bi ∈ [b_limit, b_ext) plain cross-off + bulk cross-off.
-    pub sweep_cross_rest_ns: u64,
-    /// Single-pass sweep: ext-easy leaves + P2 queries record emission
-    /// (prefix-count fill + per-query popcount).
-    pub sweep_tail_ns: u64,
+
+    // ── bi ∈ [b_limit, n_all) cross-off (split) ───────────────────────────
+    /// Plain cross-off bi ∈ [b_limit, b_ext).
+    pub rest_plain_ns: u64,
+    /// Bulk cross-off bi ∈ [b_ext, bulk_end) (includes bucket advance).
+    pub rest_bulk_ns: u64,
+
+    // ── Tail (split) ──────────────────────────────────────────────────────
+    /// `fill_prefix_counts` + seed_below_lo bsearch (lazy per segment).
+    pub tail_prefix_build_ns: u64,
+    /// Ext-easy leaf emission loop.
+    pub tail_ext_emit_ns: u64,
+    /// P2 query emission loop.
+    pub tail_p2_emit_ns: u64,
+    /// `final_count` + `seed_in_seg` bsearch + `advance_wheel_primes`.
+    pub tail_advance_ns: u64,
+
     /// Resolution pass: reconciling leaf records with `phi_band_inits` /
     /// `p2_band_inits` to produce the final `sum` / `p2_sum`.
     pub resolve_ns: u64,
+
+    // ── Light counters (no-op past dev, useful to relate time → work). ────
+    /// Number of (bi, segment) pairs that triggered leaf emission in the
+    /// bi-main loop (hard + easy-with-phi-vec).
+    pub n_bi_leaf_hits: u64,
+    /// Total non-clamp ext-easy leaves actually emitted into the fold bucket.
+    pub n_leaves_ext_emitted: u64,
+    /// Clamp leaves pre-counted (skipped by the sweep).
+    pub n_leaves_ext_clamped: u64,
+    /// Segments that actually triggered a `fill_prefix_counts`.
+    pub n_prefix_fills: u64,
+    /// Sum across segments of (bulk_active_end - b_ext) at end of band — an
+    /// average-ish measure of how many bulk primes are still being crossed
+    /// off in the tail of each band.
+    pub n_bulk_active_primes_sum: u64,
 }
 
 fn enumerate_hard_leaves(
@@ -426,16 +455,29 @@ pub fn s2_hard_sieve_par(
         i128,               // ext_fold_partial
         i64,                // ext_fold_count
         Vec<ExtEasyRec>,    // ext_stored (fallback when band_fold_floor too loose)
-        [u64; 4],           // phase timings
+        BandStats,          // fine-grained phase timings + counters
     );
+
+    #[derive(Default, Clone, Copy)]
+    struct BandStats {
+        fill_ns: u64,
+        bi_main_ns: u64,
+        rest_plain_ns: u64,
+        rest_bulk_ns: u64,
+        tail_prefix_ns: u64,
+        tail_ext_ns: u64,
+        tail_p2_ns: u64,
+        tail_advance_ns: u64,
+        n_bi_leaf_hits: u64,
+        n_ext_emitted: u64,
+        n_prefix_fills: u64,
+        n_bulk_active_sum: u64,
+    }
 
     let band_sweeps: Vec<BandSweep> = (0..num_bands)
         .into_par_iter()
         .map(|t| {
-            let mut ns_fill = 0u64;
-            let mut ns_bi   = 0u64;
-            let mut ns_rest = 0u64;
-            let mut ns_tail = 0u64;
+            let mut stats = BandStats::default();
 
             // delta only needs b_ext entries: bi >= b_ext use pi-formula.
             let mut delta: Vec<i64>       = vec![0i64; b_ext];
@@ -457,7 +499,7 @@ pub fn s2_hard_sieve_par(
                         p2_partial, p2_q_count,
                         ext_fold_partial, ext_fold_count,
                         ext_stored,
-                        [ns_fill, ns_bi, ns_rest, ns_tail]);
+                        stats);
             }
             let band_hi = (lo_start + ((t + 1) * segs_per_band) as u64 * W30_SEG as u64)
                 .min(z + W30_SEG as u64);
@@ -548,10 +590,14 @@ pub fn s2_hard_sieve_par(
                 if lo == 0 { sieve.set_bit_for_1(); }
                 let mut running_total = sieve.total_count() as i64;
                 let hi = lo + W30_SEG as u64;
-                ns_fill += t_fill.elapsed().as_nanos() as u64;
+                stats.fill_ns += t_fill.elapsed().as_nanos() as u64;
 
-                let t_bi = Instant::now();
                 // ── bi ∈ [0, b_limit): counted cross-off + delta update + leaf emit ──
+                // Measured as a single region per segment (not per-bi) because a
+                // nested Instant::now() would be called ~b_limit × num_segs times
+                // per band and add ~200 s of overhead at x=1e17 α=2. The counter
+                // `n_bi_leaf_hits` lets us weigh leaf vs xoff time afterwards.
+                let t_bi = Instant::now();
                 for bi in 0..b_limit {
                     let b  = bi + c + 1;
                     let pb = primes[b - 1];
@@ -571,6 +617,7 @@ pub fn s2_hard_sieve_par(
                     };
 
                     if has_leaf {
+                        stats.n_bi_leaf_hits += 1;
                         mono.reset();
                         // Snapshot local phi BEFORE this segment's running_total update
                         // (matches the pass-2 ordering: phi_vec[bi] += running_total
@@ -626,13 +673,16 @@ pub fn s2_hard_sieve_par(
                     running_total -=
                         sieve.cross_off_count_pd(lo, pb, &pb_data[bi]) as i64;
                 }
-                ns_bi += t_bi.elapsed().as_nanos() as u64;
+                stats.bi_main_ns += t_bi.elapsed().as_nanos() as u64;
 
-                let t_rest = Instant::now();
+                let t_plain = Instant::now();
                 // ── bi ∈ [b_limit, b_ext): plain cross-off (no leaves) ──────
                 for bi in b_limit..b_ext {
                     sieve.cross_off_pd(lo, primes[c + bi], &pb_data[bi]);
                 }
+                stats.rest_plain_ns += t_plain.elapsed().as_nanos() as u64;
+
+                let t_bulk = Instant::now();
                 // ── Bulk cross-off: bucket skips inactive primes (p² > hi) ──
                 if lo < y {
                     for bi in b_ext..n_all {
@@ -648,9 +698,9 @@ pub fn s2_hard_sieve_par(
                         sieve.cross_off_pd(lo, primes[c + bi], &pb_data[bi]);
                     }
                 }
-                ns_rest += t_rest.elapsed().as_nanos() as u64;
+                stats.rest_bulk_ns += t_bulk.elapsed().as_nanos() as u64;
 
-                let t_tail = Instant::now();
+                let t_advance_prep = Instant::now();
                 // After all cross-offs, sieve = prime sieve over [lo, hi).
                 let final_count = sieve.total_count() as i64;
                 let seed_in_seg: i64 = if lo < y {
@@ -662,20 +712,31 @@ pub fn s2_hard_sieve_par(
                     - if lo == 0 { 1 } else { 0 }
                     + seed_in_seg;
                 let adj_lo: i32 = if lo == 0 { 1 } else { 0 };
+                stats.tail_advance_ns +=
+                    t_advance_prep.elapsed().as_nanos() as u64;
 
                 // Lazy fill of p2_prefix (only if a record actually needs it).
                 let mut p2_prefix_ready = false;
                 let mut seed_below_lo   = 0usize;
 
+                // Helper closure fragment (used inline): every fill triggers
+                // tail_prefix_ns accounting so we can separate that cost from
+                // the ext / p2 loop bodies.
+
+                let t_ext = Instant::now();
                 // ── Ext-easy leaves (bi >= b_ext) ───────────────────────────
                 for ei in far_easy_start..n_easy {
                     if easy_ptrs[ei] >= a { continue; }
                     if easy_next_n[ei] >= hi { continue; }
                     if !p2_prefix_ready {
+                        let t_pref = Instant::now();
                         sieve.fill_prefix_counts(&mut p2_prefix);
                         seed_below_lo = if lo < y {
                             primes.partition_point(|&p| p < lo)
                         } else { 0 };
+                        stats.tail_prefix_ns +=
+                            t_pref.elapsed().as_nanos() as u64;
+                        stats.n_prefix_fills += 1;
                         p2_prefix_ready = true;
                     }
                     let bi = n_hard + ei;
@@ -709,6 +770,7 @@ pub fn s2_hard_sieve_par(
                                 ext_fold_partial +=
                                     (v - (b_m1 - 1)) as i128; // V - (b-2)
                                 ext_fold_count += 1;
+                                stats.n_ext_emitted += 1;
                             } else {
                                 ext_stored.push(ExtEasyRec {
                                     b_minus_2: (b as i32) - 2,
@@ -730,15 +792,24 @@ pub fn s2_hard_sieve_par(
                     }
                 }
 
+                stats.tail_ext_ns += t_ext.elapsed().as_nanos() as u64;
+
+                let t_p2 = Instant::now();
                 // ── P2 queries ─────────────────────────────────────────────
                 if p2_ptr > p2_start {
                     let q_check = (x / s2_primes[p2_ptr - 1] as u128) as u64;
                     if q_check >= lo && q_check < hi {
                         if !p2_prefix_ready {
+                            let t_pref = Instant::now();
                             sieve.fill_prefix_counts(&mut p2_prefix);
                             seed_below_lo = if lo < y {
                                 primes.partition_point(|&p| p < lo)
                             } else { 0 };
+                            stats.tail_prefix_ns +=
+                                t_pref.elapsed().as_nanos() as u64;
+                            stats.n_prefix_fills += 1;
+                            // p2_prefix_ready not reassigned: no further use
+                            // in this segment (last section before advance).
                         }
                         loop {
                             if p2_ptr <= p2_start { break; }
@@ -766,19 +837,25 @@ pub fn s2_hard_sieve_par(
                     }
                 }
 
+                stats.tail_p2_ns += t_p2.elapsed().as_nanos() as u64;
+
+                let t_advance = Instant::now();
+                stats.n_bulk_active_sum +=
+                    (bulk_active_end.saturating_sub(b_ext)) as u64;
                 local_p2_offset += seg_primes;
                 p2_count        += seg_primes;
 
                 let next_lo = lo + W30_SEG as u64;
                 advance_wheel_primes(&mut tiny_state, next_lo);
                 lo = next_lo;
-                ns_tail += t_tail.elapsed().as_nanos() as u64;
+                stats.tail_advance_ns +=
+                    t_advance.elapsed().as_nanos() as u64;
             }
             (delta, p2_count, leaf_partial, bi_contrib,
              p2_partial, p2_q_count,
              ext_fold_partial, ext_fold_count,
              ext_stored,
-             [ns_fill, ns_bi, ns_rest, ns_tail])
+             stats)
         })
         .collect();
 
@@ -796,10 +873,22 @@ pub fn s2_hard_sieve_par(
         p2_band_inits[t] = p2_band_inits[t - 1] + band_sweeps[t - 1].1;
     }
 
-    // ── Accumulate sweep-phase timings across bands.
-    let mut sweep_phase_sums = [0u64; 4];
+    // ── Accumulate sweep stats across bands. ─────────────────────────────
+    let mut agg = BandStats::default();
     for b in &band_sweeps {
-        for i in 0..4 { sweep_phase_sums[i] += b.9[i]; }
+        let s = &b.9;
+        agg.fill_ns           += s.fill_ns;
+        agg.bi_main_ns        += s.bi_main_ns;
+        agg.rest_plain_ns     += s.rest_plain_ns;
+        agg.rest_bulk_ns      += s.rest_bulk_ns;
+        agg.tail_prefix_ns    += s.tail_prefix_ns;
+        agg.tail_ext_ns       += s.tail_ext_ns;
+        agg.tail_p2_ns        += s.tail_p2_ns;
+        agg.tail_advance_ns   += s.tail_advance_ns;
+        agg.n_bi_leaf_hits    += s.n_bi_leaf_hits;
+        agg.n_ext_emitted     += s.n_ext_emitted;
+        agg.n_prefix_fills    += s.n_prefix_fills;
+        agg.n_bulk_active_sum += s.n_bulk_active_sum;
     }
 
     // ── Resolution pass (parallel per band) ──────────────────────────────────
@@ -850,11 +939,20 @@ pub fn s2_hard_sieve_par(
     let p2_total: u128 = resolved.iter().map(|&(_, p)| p).sum();
 
     let profile = HardProfile {
-        sweep_fill_ns:       sweep_phase_sums[0],
-        sweep_bi_main_ns:    sweep_phase_sums[1],
-        sweep_cross_rest_ns: sweep_phase_sums[2],
-        sweep_tail_ns:       sweep_phase_sums[3],
-        resolve_ns:          ns_resolve,
+        sweep_fill_ns:             agg.fill_ns,
+        sweep_bi_main_ns:          agg.bi_main_ns,
+        rest_plain_ns:             agg.rest_plain_ns,
+        rest_bulk_ns:              agg.rest_bulk_ns,
+        tail_prefix_build_ns:      agg.tail_prefix_ns,
+        tail_ext_emit_ns:          agg.tail_ext_ns,
+        tail_p2_emit_ns:           agg.tail_p2_ns,
+        tail_advance_ns:           agg.tail_advance_ns,
+        resolve_ns:                ns_resolve,
+        n_bi_leaf_hits:            agg.n_bi_leaf_hits,
+        n_leaves_ext_emitted:      agg.n_ext_emitted,
+        n_leaves_ext_clamped:      total_clamp_count.max(0) as u64,
+        n_prefix_fills:            agg.n_prefix_fills,
+        n_bulk_active_primes_sum:  agg.n_bulk_active_sum,
     };
     (s2_total, p2_total, profile)
 }

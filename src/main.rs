@@ -320,11 +320,15 @@ fn run_dr_meissel4_profile(x: u128, _threads: usize) {
     // Sub-decomposition of step3 (CPU time summed across Rayon bands; %
     // is relative to the total CPU time in S2_hard, not wall time).
     let sub = [
-        ("sweep fill+count", profile.sweep_fill_ns),
-        ("sweep bi main   ", profile.sweep_bi_main_ns),
-        ("sweep cross-off ", profile.sweep_cross_rest_ns),
-        ("sweep tail ext+P2", profile.sweep_tail_ns),
-        ("resolve records ", profile.resolve_ns),
+        ("sweep fill+count   ", profile.sweep_fill_ns),
+        ("bi main (leaf+xoff)", profile.sweep_bi_main_ns),
+        ("rest plain xoff    ", profile.rest_plain_ns),
+        ("rest bulk xoff     ", profile.rest_bulk_ns),
+        ("tail prefix build  ", profile.tail_prefix_build_ns),
+        ("tail ext-easy emit ", profile.tail_ext_emit_ns),
+        ("tail P2 emit       ", profile.tail_p2_emit_ns),
+        ("tail advance       ", profile.tail_advance_ns),
+        ("resolve records    ", profile.resolve_ns),
     ];
     let cpu_ns_total: u64 = sub.iter().map(|(_, ns)| *ns).sum();
     if cpu_ns_total > 0 {
@@ -336,6 +340,14 @@ fn run_dr_meissel4_profile(x: u128, _threads: usize) {
             println!("    │  {}  {:>9.1} ms   {:>5.1} %", lbl, ms, pct);
         }
         println!("    └─ total CPU              {:>9.1} ms", (cpu_ns_total as f64) / 1_000_000.0);
+        println!(
+            "    counters: bi_leaf_hits={}  ext_emitted={}  ext_clamped(bulk)={}  prefix_fills={}  bulk_active_sum={}",
+            fmt_thousands(profile.n_bi_leaf_hits as u128),
+            fmt_thousands(profile.n_leaves_ext_emitted as u128),
+            fmt_thousands(profile.n_leaves_ext_clamped as u128),
+            fmt_thousands(profile.n_prefix_fills as u128),
+            fmt_thousands(profile.n_bulk_active_primes_sum as u128),
+        );
     }
     println!("  total              {}", fmt_elapsed(total));
     println!("  π({}) = {}", fmt_thousands(x), fmt_thousands(result));
