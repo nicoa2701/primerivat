@@ -172,7 +172,7 @@ pub fn s2_hard_sieve_par(
     primes: &[u64],
     s2_primes: &[u64], // primes in (∛x, √x] for P2 = Σ(π(x/p) − (π(p)−1))
 ) -> (i128, u128, HardProfile) {
-    use crate::segment::{advance_wheel_primes, MonoCount, WheelPrimeData, WheelSieve30, W30_SEG, W30_WORDS, wheel30_next_k};
+    use crate::segment::{advance_wheel_primes, MonoCount, WheelPrimeData, WheelSieve30, W30_IDX, W30_SEG, W30_WORDS, wheel30_next_k};
     use rayon::prelude::*;
     use std::time::Instant;
 
@@ -602,6 +602,17 @@ pub fn s2_hard_sieve_par(
                 }
                 end
             };
+
+            // Per-band persistent cross-off state for bulk primes, keyed by
+            // `k = bi - b_ext`. Avoids the per-segment `(lo + p - 1) / p`
+            // division: after segment N, `bulk_next_m[k]` holds the next
+            // wheel-30 multiple of `primes[c + b_ext + k]` that the cross-off
+            // should land on; `bulk_next_j[k]` is the matching wheel index.
+            // State is initialised lazily as `bulk_active_end` advances.
+            let bulk_cap = n_all.saturating_sub(b_ext);
+            let mut bulk_next_m: Vec<u64> = vec![0u64; bulk_cap];
+            let mut bulk_next_j: Vec<u8>  = vec![0u8;  bulk_cap];
+            let mut bulk_state_valid_end: usize = 0;
             // b_limit: max bi for which leaves are still possible (monotone ↓).
             let mut b_limit = b_ext;
             while b_limit > 0 && band_lo > leaf_cutoff_lo[b_limit - 1] {
@@ -715,19 +726,36 @@ pub fn s2_hard_sieve_par(
 
                 let t_bulk = Instant::now();
                 // ── Bulk cross-off: bucket skips inactive primes (p² > hi) ──
-                if lo < y {
-                    for bi in b_ext..n_all {
-                        sieve.cross_off_pd(lo, primes[c + bi], &pb_data[bi]);
-                    }
+                let target_end: usize = if lo < y {
+                    n_all - b_ext
                 } else {
                     while bulk_active_end < n_all {
                         let p = primes[c + bulk_active_end] as u64;
                         if p * p > hi { break; }
                         bulk_active_end += 1;
                     }
-                    for bi in b_ext..bulk_active_end {
-                        sieve.cross_off_pd(lo, primes[c + bi], &pb_data[bi]);
-                    }
+                    bulk_active_end - b_ext
+                };
+                // Initialise persistent state for primes that just became
+                // active this segment (paid once per prime per band).
+                while bulk_state_valid_end < target_end {
+                    let k = bulk_state_valid_end;
+                    let p = primes[c + b_ext + k] as u64;
+                    let k0 = (lo + p - 1) / p;
+                    let k1 = wheel30_next_k(k0);
+                    bulk_next_m[k] = k1 * p;
+                    bulk_next_j[k] = W30_IDX[(k1 % 30) as usize];
+                    bulk_state_valid_end += 1;
+                }
+                // Cross-off with incremental state: no per-call 64-bit div.
+                for k in 0..target_end {
+                    let p = primes[c + b_ext + k] as u64;
+                    let (nm, nj) = sieve.cross_off_pd_from_state(
+                        lo, p, &pb_data[b_ext + k],
+                        bulk_next_m[k], bulk_next_j[k],
+                    );
+                    bulk_next_m[k] = nm;
+                    bulk_next_j[k] = nj;
                 }
                 stats.rest_bulk_ns += t_bulk.elapsed().as_nanos() as u64;
 

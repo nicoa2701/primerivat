@@ -692,6 +692,52 @@ impl WheelSieve30 {
         cleared
     }
 
+    /// Like [`cross_off_pd`] but resumes from a stored `(next_m, next_j)`
+    /// state instead of recomputing the first multiple with a 64-bit division.
+    ///
+    /// `next_m` is the next multiple of `p` (coprime to 30) ≥ previous segment's
+    /// `hi`; may be `< lo` if the prime was idle for several segments.
+    /// `next_j` is the wheel-30 position index for `next_m`.
+    ///
+    /// Returns the updated `(next_m, next_j)` for the following segment.
+    #[inline]
+    pub fn cross_off_pd_from_state(
+        &mut self,
+        lo: u64,
+        _p: u64,
+        pd: &WheelPrimeData,
+        next_m: u64,
+        next_j: u8,
+    ) -> (u64, u8) {
+        debug_assert_eq!(lo % 30, 0);
+        let end = lo + W30_SEG as u64;
+        let mut m = next_m;
+        let mut j = next_j as usize;
+
+        // Advance to first multiple ≥ lo. For primes ≫ W30_SEG this is 0-1
+        // iterations; for primes ≪ W30_SEG the while is never entered because
+        // the previous segment already left m in [lo_prev, lo_prev+W30_SEG) and
+        // the step below naturally continues.
+        while m < lo {
+            m += pd.gap_m[j] as u64;
+            j = (j + 1) & 7;
+        }
+
+        if m < end {
+            // `m` has residue w30res_p[j] mod 30, so (m - lo) / 30 is exact.
+            let mut group = ((m - lo) / 30) as usize;
+            while m < end {
+                let bit_idx = group * 8 + pd.bit_seq[j] as usize;
+                self.bits[bit_idx >> 6] &= !(1u64 << (bit_idx & 63));
+                group += pd.delta_group[j] as usize;
+                m += pd.gap_m[j] as u64;
+                j = (j + 1) & 7;
+            }
+        }
+
+        (m, j as u8)
+    }
+
     /// Like [`cross_off_count_pd`] but does not count cleared bits.
     ///
     /// Use this for the bulk cross-off pass where the count is not needed,
