@@ -605,13 +605,13 @@ pub fn s2_hard_sieve_par(
 
             // Per-band persistent cross-off state for bulk primes, keyed by
             // `k = bi - b_ext`. Avoids the per-segment `(lo + p - 1) / p`
-            // division: after segment N, `bulk_next_m[k]` holds the next
-            // wheel-30 multiple of `primes[c + b_ext + k]` that the cross-off
-            // should land on; `bulk_next_j[k]` is the matching wheel index.
+            // division: after segment N, `bulk_next_m_off[k]` holds
+            // `next_m - band_lo` (u32 offset) for `primes[c + b_ext + k]`;
+            // `bulk_next_j[k]` is the matching wheel-30 position index.
             // State is initialised lazily as `bulk_active_end` advances.
             let bulk_cap = n_all.saturating_sub(b_ext);
-            let mut bulk_next_m: Vec<u64> = vec![0u64; bulk_cap];
-            let mut bulk_next_j: Vec<u8>  = vec![0u8;  bulk_cap];
+            let mut bulk_next_m_off: Vec<u32> = vec![0u32; bulk_cap];
+            let mut bulk_next_j:     Vec<u8>  = vec![0u8;  bulk_cap];
             let mut bulk_state_valid_end: usize = 0;
             // b_limit: max bi for which leaves are still possible (monotone ↓).
             let mut b_limit = b_ext;
@@ -743,19 +743,19 @@ pub fn s2_hard_sieve_par(
                     let p = primes[c + b_ext + k] as u64;
                     let k0 = (lo + p - 1) / p;
                     let k1 = wheel30_next_k(k0);
-                    bulk_next_m[k] = k1 * p;
-                    bulk_next_j[k] = W30_IDX[(k1 % 30) as usize];
+                    bulk_next_m_off[k] = (k1 * p - band_lo) as u32;
+                    bulk_next_j[k]     = W30_IDX[(k1 % 30) as usize];
                     bulk_state_valid_end += 1;
                 }
                 // Cross-off with incremental state: no per-call 64-bit div.
+                let lo_off = (lo - band_lo) as u32;
                 for k in 0..target_end {
-                    let p = primes[c + b_ext + k] as u64;
-                    let (nm, nj) = sieve.cross_off_pd_from_state(
-                        lo, p, &pb_data[b_ext + k],
-                        bulk_next_m[k], bulk_next_j[k],
+                    let (nm_off, nj) = sieve.cross_off_pd_from_state(
+                        lo_off, &pb_data[b_ext + k],
+                        bulk_next_m_off[k], bulk_next_j[k],
                     );
-                    bulk_next_m[k] = nm;
-                    bulk_next_j[k] = nj;
+                    bulk_next_m_off[k] = nm_off;
+                    bulk_next_j[k]     = nj;
                 }
                 stats.rest_bulk_ns += t_bulk.elapsed().as_nanos() as u64;
 

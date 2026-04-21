@@ -692,45 +692,48 @@ impl WheelSieve30 {
         cleared
     }
 
-    /// Like [`cross_off_pd`] but resumes from a stored `(next_m, next_j)`
+    /// Like [`cross_off_pd`] but resumes from a stored `(next_m_off, next_j)`
     /// state instead of recomputing the first multiple with a 64-bit division.
     ///
-    /// `next_m` is the next multiple of `p` (coprime to 30) ≥ previous segment's
-    /// `hi`; may be `< lo` if the prime was idle for several segments.
+    /// `lo_off` is `lo - band_lo` (offset of the current segment start within
+    /// the band). `next_m_off` is `next_m - band_lo`, where `next_m` is the
+    /// next wheel-30 multiple of `p` ≥ previous segment's `hi`; may be
+    /// `< lo_off` if the prime was idle for several segments.
     /// `next_j` is the wheel-30 position index for `next_m`.
     ///
-    /// Returns the updated `(next_m, next_j)` for the following segment.
+    /// Caller must ensure `next_m - band_lo` and all intermediate values up
+    /// to `next_m_off + 2*p` fit in u32. At x ≤ 4e18 with p ≤ √x ≤ 2e9 and
+    /// `band_range ≤ u32::MAX - 2p`, this always holds.
+    ///
+    /// Returns the updated `(next_m_off, next_j)` for the following segment.
     #[inline]
     pub fn cross_off_pd_from_state(
         &mut self,
-        lo: u64,
-        _p: u64,
+        lo_off: u32,
         pd: &WheelPrimeData,
-        next_m: u64,
+        next_m_off: u32,
         next_j: u8,
-    ) -> (u64, u8) {
-        debug_assert_eq!(lo % 30, 0);
-        let end = lo + W30_SEG as u64;
-        let mut m = next_m;
+    ) -> (u32, u8) {
+        debug_assert_eq!(lo_off % 30, 0);
+        let end_off = lo_off + W30_SEG as u32;
+        let mut m = next_m_off;
         let mut j = next_j as usize;
 
-        // Advance to first multiple ≥ lo. For primes ≫ W30_SEG this is 0-1
-        // iterations; for primes ≪ W30_SEG the while is never entered because
-        // the previous segment already left m in [lo_prev, lo_prev+W30_SEG) and
-        // the step below naturally continues.
-        while m < lo {
-            m += pd.gap_m[j] as u64;
+        // Advance to first multiple ≥ lo_off. For primes ≫ W30_SEG this is
+        // 0-1 iterations; for primes ≪ W30_SEG the while is never entered.
+        while m < lo_off {
+            m += pd.gap_m[j];
             j = (j + 1) & 7;
         }
 
-        if m < end {
-            // `m` has residue w30res_p[j] mod 30, so (m - lo) / 30 is exact.
-            let mut group = ((m - lo) / 30) as usize;
-            while m < end {
+        if m < end_off {
+            // `m` has residue w30res_p[j] mod 30, so (m - lo_off) / 30 is exact.
+            let mut group = ((m - lo_off) / 30) as usize;
+            while m < end_off {
                 let bit_idx = group * 8 + pd.bit_seq[j] as usize;
                 self.bits[bit_idx >> 6] &= !(1u64 << (bit_idx & 63));
                 group += pd.delta_group[j] as usize;
-                m += pd.gap_m[j] as u64;
+                m += pd.gap_m[j];
                 j = (j + 1) & 7;
             }
         }
