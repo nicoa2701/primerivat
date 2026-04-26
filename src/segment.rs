@@ -830,6 +830,67 @@ impl WheelSieve30 {
         (m, j as u8)
     }
 
+    /// Like [`cross_off_pd_from_state`] but Kim-style unrolled. Same dispatch
+    /// pattern as `cross_off_pd_unrolled` (8 fns by residue group `g`), but
+    /// the per-group fn enters its inner loop at an arbitrary `j_start` and
+    /// returns the final `(g, j)` so the caller can recover `next_m` for the
+    /// following segment via `m = lo + g * 30 + w30res_p[j]`.
+    ///
+    /// `next_m` may be `< lo` (prime was idle for several segments); the
+    /// catch-up loop still uses scalar `gap_m[j]` advances since this is a
+    /// rare path (≤ a few iterations per call).
+    #[inline]
+    pub fn cross_off_pd_from_state_unrolled(
+        &mut self,
+        lo: u64,
+        _p: u64,
+        pd: &WheelPrimeData,
+        next_m: u64,
+        next_j: u8,
+    ) -> (u64, u8) {
+        debug_assert_eq!(lo % 30, 0);
+        let end = lo + W30_SEG as u64;
+        let mut m = next_m;
+        let mut j = next_j as usize;
+
+        // Catch-up: m may be < lo if prime was idle for several segments.
+        while m < lo {
+            m += pd.gap_m[j] as u64;
+            j = (j + 1) & 7;
+        }
+
+        if m >= end {
+            return (m, j as u8);
+        }
+
+        // m has residue w30res_p[j] mod 30, so (m - lo) / 30 is exact.
+        let group_start = ((m - lo) / 30) as usize;
+
+        let bits_bytes: &mut [u8] = unsafe {
+            core::slice::from_raw_parts_mut(self.bits.as_mut_ptr() as *mut u8, W30_WORDS * 8)
+        };
+
+        let g = pd.bit_seq[0] as usize;
+        let dg = &pd.delta_group;
+        let (final_g, final_j) = match g {
+            0 => xoff_state_unrolled_g0(bits_bytes, group_start, j, dg),
+            1 => xoff_state_unrolled_g1(bits_bytes, group_start, j, dg),
+            2 => xoff_state_unrolled_g2(bits_bytes, group_start, j, dg),
+            3 => xoff_state_unrolled_g3(bits_bytes, group_start, j, dg),
+            4 => xoff_state_unrolled_g4(bits_bytes, group_start, j, dg),
+            5 => xoff_state_unrolled_g5(bits_bytes, group_start, j, dg),
+            6 => xoff_state_unrolled_g6(bits_bytes, group_start, j, dg),
+            7 => xoff_state_unrolled_g7(bits_bytes, group_start, j, dg),
+            _ => unsafe { std::hint::unreachable_unchecked() },
+        };
+
+        // Recover m from (g, j): the bit at group g, wheel-pos j satisfies
+        // m mod 30 = pd.w30res_p[j], so m = lo + g*30 + w30res_p[j]. Valid
+        // even when final_g >= W30_GROUPS (m can exceed `end`).
+        let final_m = lo + (final_g as u64) * 30 + pd.w30res_p[final_j] as u64;
+        (final_m, final_j as u8)
+    }
+
     /// Like [`cross_off_count_pd`] but does not count cleared bits.
     ///
     /// Use this for the bulk cross-off pass where the count is not needed,
@@ -1102,6 +1163,81 @@ impl_xoff_count_unrolled!(xoff_count_unrolled_g5, 5, 3, 7, 1, 6, 0, 4, 2);
 impl_xoff_count_unrolled!(xoff_count_unrolled_g6, 6, 2, 3, 7, 0, 4, 5, 1);
 impl_xoff_count_unrolled!(xoff_count_unrolled_g7, 7, 6, 5, 4, 3, 2, 1, 0);
 
+// State-resume variants: same shape as `impl_xoff_unrolled!` but accept an
+// arbitrary `j_start` (entry wheel-pos) and return `(final_g, final_j)` =
+// the next position to clear had the loop continued. The caller then maps
+// this back to `(next_m, next_j)` for the following segment via
+// `m = lo + final_g * 30 + w30res_p[final_j]`. Used by the bulk cross-off
+// path where each prime resumes across segments without recomputing
+// `m_start` via a 64-bit division.
+macro_rules! impl_xoff_state_unrolled {
+    ($name:ident, $b0:literal, $b1:literal, $b2:literal, $b3:literal,
+                  $b4:literal, $b5:literal, $b6:literal, $b7:literal) => {
+        #[inline]
+        fn $name(
+            bits: &mut [u8],
+            group_start: usize,
+            j_start: usize,
+            dg: &[u32; 8],
+        ) -> (usize, usize) {
+            const BITS: [u8; 8] = [$b0, $b1, $b2, $b3, $b4, $b5, $b6, $b7];
+            let d0 = dg[0] as usize;
+            let d1 = dg[1] as usize;
+            let d2 = dg[2] as usize;
+            let d3 = dg[3] as usize;
+            let d4 = dg[4] as usize;
+            let d5 = dg[5] as usize;
+            let d6 = dg[6] as usize;
+            let d7 = dg[7] as usize;
+            let d_arr = [d0, d1, d2, d3, d4, d5, d6, d7];
+            let max_offset = d0 + d1 + d2 + d3 + d4 + d5 + d6;
+            let group_end = W30_GROUPS;
+
+            let mut g = group_start;
+
+            // Pre-roll: complete the partial cycle from `j_start..8`.
+            for jj in j_start..8 {
+                if g >= group_end { return (g, jj); }
+                unsafe { *bits.get_unchecked_mut(g) &= !(1u8 << BITS[jj]); }
+                g += d_arr[jj];
+            }
+
+            // Main unrolled: each cycle covers 8 wheel positions and advances
+            // `g` by `p` bytes.
+            while g + max_offset < group_end {
+                unsafe {
+                    *bits.get_unchecked_mut(g) &= !(1u8 << $b0); g += d0;
+                    *bits.get_unchecked_mut(g) &= !(1u8 << $b1); g += d1;
+                    *bits.get_unchecked_mut(g) &= !(1u8 << $b2); g += d2;
+                    *bits.get_unchecked_mut(g) &= !(1u8 << $b3); g += d3;
+                    *bits.get_unchecked_mut(g) &= !(1u8 << $b4); g += d4;
+                    *bits.get_unchecked_mut(g) &= !(1u8 << $b5); g += d5;
+                    *bits.get_unchecked_mut(g) &= !(1u8 << $b6); g += d6;
+                    *bits.get_unchecked_mut(g) &= !(1u8 << $b7); g += d7;
+                }
+            }
+
+            // Tail: from j=0, step by step until we cross group_end.
+            for jj in 0..8 {
+                if g >= group_end { return (g, jj); }
+                unsafe { *bits.get_unchecked_mut(g) &= !(1u8 << BITS[jj]); }
+                g += d_arr[jj];
+            }
+            // Tail completed all 8 steps without exit: next wheel-pos is 0.
+            (g, 0)
+        }
+    };
+}
+
+impl_xoff_state_unrolled!(xoff_state_unrolled_g0, 0, 1, 2, 3, 4, 5, 6, 7);
+impl_xoff_state_unrolled!(xoff_state_unrolled_g1, 1, 5, 4, 0, 7, 3, 2, 6);
+impl_xoff_state_unrolled!(xoff_state_unrolled_g2, 2, 4, 0, 6, 1, 7, 3, 5);
+impl_xoff_state_unrolled!(xoff_state_unrolled_g3, 3, 0, 6, 5, 2, 1, 7, 4);
+impl_xoff_state_unrolled!(xoff_state_unrolled_g4, 4, 7, 1, 2, 5, 6, 0, 3);
+impl_xoff_state_unrolled!(xoff_state_unrolled_g5, 5, 3, 7, 1, 6, 0, 4, 2);
+impl_xoff_state_unrolled!(xoff_state_unrolled_g6, 6, 2, 3, 7, 0, 4, 5, 1);
+impl_xoff_state_unrolled!(xoff_state_unrolled_g7, 7, 6, 5, 4, 3, 2, 1, 0);
+
 /// Advances wheel-sieve state so that each `m` is the first coprime-to-30
 /// multiple of `p` at or after `next_lo`.
 ///
@@ -1348,6 +1484,76 @@ mod tests {
                     "bits mismatch lo={} p={} (p%30={}, g={})",
                     lo, p, p % 30, W30_IDX[(p % 30) as usize],
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn cross_off_pd_from_state_unrolled_matches_cross_off_pd_from_state() {
+        // Multi-segment chained run: feed each segment's output state into the
+        // next segment's input. Both rolled and unrolled arms must agree on
+        // every (bits, m, j) at every step. Covers:
+        //  - fresh entry where m_start ≥ lo (no catch-up)
+        //  - resume from prior segment with m anywhere in [prev_lo, end_prev) +
+        //    final wheel advance, possibly landing < current lo (catch-up runs)
+        //  - large primes where one cycle ≥ segment (only pre-roll fires)
+        //  - small primes where main unrolled loop runs many times
+        //  - exit-from-pre-roll, exit-from-tail, and exit-from-main paths.
+        let primes_to_test: &[u64] = &[
+            7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71, 73, 79, 83, 89, 97,
+            127, 211, 257, 311, 401, 503, 601, 701, 809, 907,
+            719, 727, 733,
+            12_007, 65_521, 524_287, 524_309,
+            // Specific p > W30_SEG to exercise multi-segment catch-up.
+            1_000_003, 5_000_011,
+        ];
+        let n_segs = 5;
+        for &p in primes_to_test {
+            let pd = WheelPrimeData::new(p);
+
+            // Initial state: fresh entry at lo=0, mimicking what the caller
+            // does in dr/hard.rs:758-761.
+            let lo0 = 0u64;
+            let k0 = (lo0 + p - 1) / p;
+            let k1 = wheel30_next_k(k0);
+            let mut nm_ref = k1 * p;
+            let mut nj_ref = W30_IDX[(k1 % 30) as usize];
+            let mut nm_new = nm_ref;
+            let mut nj_new = nj_ref;
+
+            for seg in 0..n_segs {
+                let lo = lo0 + (seg as u64) * W30_SEG as u64;
+
+                // Fill both sieves identically each segment so we only test
+                // this segment's cross-off contribution.
+                let mut s_ref = WheelSieve30::new();
+                s_ref.fill(lo, &[]);
+                let mut s_new = WheelSieve30::new();
+                s_new.bits.copy_from_slice(&s_ref.bits);
+
+                let (nm_ref_after, nj_ref_after) =
+                    s_ref.cross_off_pd_from_state(lo, p, &pd, nm_ref, nj_ref);
+                let (nm_new_after, nj_new_after) =
+                    s_new.cross_off_pd_from_state_unrolled(lo, p, &pd, nm_new, nj_new);
+
+                assert_eq!(
+                    nm_ref_after, nm_new_after,
+                    "m mismatch p={} seg={} (in: nm_ref={}, nj_ref={})",
+                    p, seg, nm_ref, nj_ref,
+                );
+                assert_eq!(
+                    nj_ref_after, nj_new_after,
+                    "j mismatch p={} seg={}", p, seg,
+                );
+                assert_eq!(
+                    s_ref.bits, s_new.bits,
+                    "bits mismatch p={} seg={}", p, seg,
+                );
+
+                nm_ref = nm_ref_after;
+                nj_ref = nj_ref_after;
+                nm_new = nm_new_after;
+                nj_new = nj_new_after;
             }
         }
     }

@@ -764,6 +764,12 @@ pub fn s2_hard_sieve_par(
                     bulk_state_valid_end += 1;
                 }
                 // Cross-off with incremental state: no per-call 64-bit div.
+                // NB: `cross_off_pd_from_state_unrolled` (Phase 3) exists in
+                // segment.rs and is bit/state-exact, but switching to it
+                // here regressed `rest_bulk_xoff` by ~25 % at 1e15 α=1: the
+                // bulk primes do 0–3 cross-offs/seg on average, and the
+                // 8-way dispatch + byte-view + (m,j)-recovery overhead
+                // exceeds the per-iteration savings. Kept rolled here.
                 for k in 0..target_end {
                     let p = primes[c + b_ext + k] as u64;
                     let (nm, nj) = sieve.cross_off_pd_from_state(
