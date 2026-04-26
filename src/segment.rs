@@ -415,11 +415,10 @@ pub struct WheelSieve30 {
     bits: [u64; W30_WORDS],
 }
 
-/// Monotonic-stop cursor for [`WheelSieve30::count_monotonic`] and
-/// [`WheelSieve30::count_primes_upto_int_m`]. Tracks how many full u64 words
-/// of `bits` have already been folded into `sum`, so subsequent queries with
-/// a larger stop only popcount the newly traversed words. Reset per bi via
-/// [`MonoCount::reset`].
+/// Monotonic-stop cursor for [`WheelSieve30::count_primes_upto_int_m`].
+/// Tracks how many full u64 words of `bits` have already been folded into
+/// `sum`, so subsequent queries with a larger stop only popcount the newly
+/// traversed words. Reset per bi via [`MonoCount::reset`].
 #[derive(Clone, Copy)]
 pub struct MonoCount {
     /// Words in `[0, w)` are already added to `sum`.
@@ -845,26 +844,6 @@ impl WheelSieve30 {
         let word = local / 240;
         let mask = W30_MASK_LEQ_240[local % 240];
         prefix[word] + (self.bits[word] & mask).count_ones()
-    }
-
-    /// Counts set bits in `bits[0 ..= last_bit]` using the monotonic cursor.
-    /// Successive calls MUST pass non-decreasing `last_bit` values within the
-    /// same scan; reset via [`MonoCount::reset`] between scans (e.g. between
-    /// `bi` values).
-    #[inline]
-    pub fn count_monotonic(&self, stop: &mut MonoCount, last_bit: usize) -> u64 {
-        debug_assert!(last_bit < W30_BITS);
-        let target_word = last_bit >> 6;
-        // Fold in every full word between the previously-consumed frontier
-        // and `target_word`.
-        while stop.w < target_word {
-            stop.sum += self.bits[stop.w].count_ones() as u64;
-            stop.w += 1;
-        }
-        // Popcount the partial word that contains `last_bit`.
-        let bit = last_bit & 63;
-        let mask = u64::MAX >> (63 - bit);
-        stop.sum + (self.bits[target_word] & mask).count_ones() as u64
     }
 
     /// Monotonic variant of [`count_primes_upto_int`]. `n` must satisfy
