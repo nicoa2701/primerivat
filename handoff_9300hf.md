@@ -2,52 +2,65 @@
 
 Pendant à `handoff_13450hx.md`. Note pour la **prochaine session dédiée**
 sur le **i5-9300HF** (4c/8t, 32 KB L1d, 256 KB L2, 8 MB L3, AVX2 only —
-pas d'AVX-512). Écrite le 2026-04-26 à la fin d'une session d'analyse
-+ optims légères + comparaison à primecount.
+pas d'AVX-512). Écrite le 2026-04-26, mise à jour en fin de session
+**Phase 1 + 2A** Kim-style cross-off déroulé.
 
 ---
 
-## État au 2026-04-26 (5 commits poussés cette session, dernière révision `47a8e57`)
+## État au 2026-04-26 (8 commits cumulés, dernière révision `e2528cf`)
 
 ```
+e2528cf segment: Kim-style 8-way unrolled cross_off_count for bi_main (Phase 2A)
+66ce0b1 segment: Kim-style 8-way unrolled cross-off for rest_plain_xoff (Phase 1)
+d7ecaa4 docs: refresh 9300HF handoff for post-7bb4099 state
 47a8e57 segment: drop orphan count_monotonic
 7bb4099 segment: use 240-block masks for wheel counts
 25f6f9e docs: add per-CPU handoff notes for follow-up sessions
 9772571 cpu_detect: wrap __cpuid calls in unsafe for older Rust toolchains
 8349c91 S2_hard: replace 8-elt partition_point with 30-byte lookup in popcount hot path
-85426ab profile: split bi_main timer into leaf-emit vs xoff+bookkeeping
 ```
 
-Deux gains de perf empilés (universels α=1/α=2) :
-- `8349c91` (Piste A2) — remplace `partition_point` 8-elt par lookup 30-byte
-  `W30_J_FOR_REM` dans `count_primes_upto_int{,_m}`. **−12 % wall à 1e15 / −8 % à 1e17**.
-- `7bb4099` (Piste A2 raffinée Kim-style) — remplace le 30-byte LUT + arith
-  (`/30`, `%30`, reconstruction `last_bit`, `>>6`, shift) par une seule table
-  `W30_MASK_LEQ_240[u64]` (1920 B, tient en L1d). 240 = 8 résidus × 30 = un mot
-  u64 entier, donc `local/240` = word index, `local%240` = mask key. Réduit les
-  deux fonctions count à 2 div/mod + 1 LUT load. **−10 % wall à 1e15 / −8 % à 1e17**.
-  Knock-on : `bi_main_xoff` passe de 32 % à 27 % CPU share via inlining compilo.
-- `47a8e57` — suppression de `count_monotonic` orphelin (son seul caller
-  `count_primes_upto_int_m` a été inliné dans `7bb4099`).
+Trois groupes de gains empilés cette session (universels α=1/α=2) :
+- **Popcount LUTs** (`8349c91` + `7bb4099` + `47a8e57`) — `count_primes_upto_int{,_m}`
+  réduit à 2 div/mod + 1 LUT load via la table `W30_MASK_LEQ_240[u64]` (1920 B en L1d).
+  Cumulé ~−18 % wall à 1e15 / ~−14 % à 1e17 vs pré-cascade.
+- **`66ce0b1` Phase 1** — `cross_off_pd_unrolled` Kim-style pour `rest_plain_xoff`.
+  8 fonctions spécialisées par groupe `g = W30_IDX[p%30]`, dispatchées via
+  `match pd.bit_seq[0]`. Bit positions baked en immédiats → `andb m8, imm8`
+  chaîné. Pré-roll j0..8 + main loop déroulée 8-step (avance `p` bytes/cycle)
+  + tail.
+- **`e2528cf` Phase 2A** — `cross_off_count_pd_unrolled` même structure pour
+  `bi_main_xoff`, plus accumulateur `cleared`. **Détail critique** : le macro
+  per-step doit faire `*bits[g] &= !mask` après lecture explicite (pas
+  `*bits[g] = byte & !mask`) pour conserver le RMW natif et éviter la
+  régression +46 % observée avec le pattern store-via-register.
 
-**Baseline 9300HF post-`7bb4099` (Win, défaut `-b 16`) :**
+**Baseline 9300HF cool post-`e2528cf` (Win, défaut `-b 16`, médiane 2 cool trials) :**
 
-| x | wall | régime |
-|---|---:|---|
-| 1e15 | 2.17 s | α=1 |
-| 1e17 | 49.77 s | α=2 |
+| x | wall | régime | vs post-`7bb4099` | vs `e2528cf` baseline mesuré direct |
+|---|---:|---|---:|---:|
+| 1e15 | **1.847 s** | α=1 | −15 % | (baseline mesurée 2.193 s : −15.8 %) |
+| 1e17 | **46.486 s** | α=2 | −7 % | (baseline mesurée 53.672 s : −13.4 %) |
 
-**Comparaison vs primecount** (mesure WSL en début de session, pré-`7bb4099`) :
+**Speedups par poste cool-machine** (vs baseline `d7ecaa4` mesurée direct dans la même session) :
 
-| x | nous WSL | primecount WSL | facteur |
+| poste | regime | baseline | HEAD (P1+2A) | gain |
+|---|---|---:|---:|---:|
+| `bi_main_xoff` CPU | 1e15 α=1 | 5959 ms | 2566 ms | **2.32×** |
+| `rest_plain_xoff` CPU | 1e15 α=1 | 2778 ms | 1343 ms | **2.07×** |
+| `bi_main_xoff` CPU | 1e17 α=2 | 89 396 ms | 40 605 ms | **2.20×** |
+| `rest_plain_xoff` CPU | 1e17 α=2 | 37 224 ms | 31 875 ms | 1.17× (primes plus larges, moins de cycles déroulés) |
+
+**Comparaison vs primecount Kim WSL** (handoff de référence, à re-mesurer post-2A) :
+
+| x | nous Win cool | primecount WSL | facteur estimé |
 |---|---:|---:|---:|
-| 1e15 | 2.24 s | 0.407 s | 5.5× |
-| 1e17 | 51.0 s | 7.68 s | 6.6× |
+| 1e15 | 1.847 s | 0.407 s | **~4.5×** |
+| 1e17 | 46.486 s | 7.68 s | **~6.05×** |
 
-> L'écart réel post-`7bb4099` est probablement ~6.0–6.2× à 1e17 (back-calc :
-> 51.0 × 0.92 ≈ 46.8 s WSL, 46.8 / 7.68 ≈ 6.1×). À re-mesurer en WSL pour
-> confirmer. WSL vs Windows = ~6 % wall, efficacité Rayon identique 78 %.
-> L'écart est *implémentation*, pas OS.
+> Mesure WSL post-`e2528cf` à faire pour figer le facteur (Win→WSL ~6-7 %).
+> Avant cette session : 5.5× / 6.6× ; après Phase 1+2A : ~4.5× / ~6.05×.
+> Phase 3 (rest_bulk) reste à faire pour viser 3-4× Kim.
 
 ---
 
@@ -93,87 +106,82 @@ Compilé depuis le même tree, build dir = `c:/Users/Kbda9/projet/3rivat3/primec
 
 ---
 
-## Profile détaillé à 1e17 α=2 (post-`8349c91`, WSL)
+## Profile détaillé à 1e17 α=2 (post-`e2528cf`, Win cool, single trial)
 
-CPU 319 s / wall 51 s = 6.26× sur 8 threads = **78 % efficient**.
+CPU 263 s / wall 46.5 s = 5.66× sur 8 threads = **71 % efficient**.
 
-> Mesuré pré-`7bb4099`. Post-`7bb4099` les shares restent à ~1 pp près
-> (bi_main_xoff 32 % → 27 %, déjà reflété ci-dessous puisque la mesure
-> a été faite après `8349c91` qui avait déjà rebattu les cartes via inlining).
+> Le drop d'efficacité Rayon (78 → 71 %) post-2A est attendu : on a éliminé
+> ~64 s de CPU sur `bi_main_xoff`, mais le wall ne descend que ~7 s parce
+> que les autres bands sont saturées par `rest_bulk_xoff` (toujours rolled)
+> et `tail_ext_emit`. Phase 3 (rest_bulk déroulé) devrait reéquilibrer.
 
-| poste | CPU | s | type | levier |
+| poste | CPU | s | type | levier restant |
 |---|---:|---:|---|---|
-| **bi_main_xoff** | **27.6 %** | **88** | counted cross-off (small primes 13–960) | cross-off déroulé switch-64 |
-| **tail_ext_emit** | 29.4 % | 94 | popcount-based leaf emit | counter array always-current |
-| rest_bulk_xoff | 21.0 % | 67 | state-resume cross-off (mid-large primes) | cross-off déroulé switch-64 |
-| rest_plain_xoff | 12.9 % | 41 | plain cross-off (mid primes) | cross-off déroulé switch-64 |
-| tail_advance | 5.2 % | 17 | total_count + bsearches | minor |
-| bi_main_leaf | 3.4 % | 11 | popcount + leaf-fold | déjà optimisé par A2 |
+| **tail_ext_emit** | **37.3 %** | **98** | popcount-based leaf emit | déjà optimal (LUT 240) |
+| **rest_bulk_xoff** | 24.3 % | 64 | state-resume cross-off (mid-large primes) | **Phase 3** : cross-off déroulé switch-64 |
+| **bi_main_xoff** | 15.4 % | 41 | counted cross-off (Kim-déroulé Phase 2A) | minor (déroulé fait) |
+| **rest_plain_xoff** | 12.1 % | 32 | plain cross-off (Kim-déroulé Phase 1) | minor (déroulé fait) |
+| tail_advance | 6.2 % | 16 | total_count + bsearches | minor |
+| bi_main_leaf | 4.1 % | 11 | popcount + leaf-fold | déjà optimisé |
 | reste | < 1 % | — | fill, p2, sweep | non |
 
-Cross-off total = **62 % CPU**. C'est le levier #1.
+Cross-off total = **51.8 % CPU** (vs 62 % pré-Phase-1+2A). Le levier #1 restant
+est `rest_bulk_xoff` qui passe de 21 % → 24 % en relatif (mais l'absolu est
+similaire 67→64 s, juste la base CPU a baissé).
 
 ---
 
-## Plan séance dédiée prochaine (≈ 5–8 h focus)
+## Phase 1 + 2A : DONE (cette session)
 
-**Objectif** : se rapprocher de primecount à **3-4× Kim** (≈ 25-30 s à
-1e17 sur 9300HF) via le cross-off déroulé Kim-style.
+**Phase 1 (`66ce0b1`) — `cross_off_pd_unrolled`** pour `rest_plain_xoff`.
+8 fonctions spécialisées par groupe via macro `impl_xoff_unrolled!`.
+Asm vérifiée : main loop = 8× `andb m8, imm8` chaînés sur 8 adresses
+pré-calculées + 3 adds + cmp + jb (= identique au pattern Kim Sieve.cpp).
 
-### Phase 1 : `cross_off_pd` (rest_plain_xoff, 11.6 % CPU)
+**Phase 2A (`e2528cf`) — `cross_off_count_pd_unrolled`** pour `bi_main_xoff`.
+Même structure + `cleared` accumulator. Macro `impl_xoff_count_unrolled!`
+(piège évité : utiliser `*bits[g] &= !mask` après lecture explicite, pas
+`*bits[g] = byte & !mask` qui régressait +46 %).
 
-Le plus simple : pas de count, pas de state. 8 specialized functions
-(une par residue group p%30 ∈ {1,7,11,…,29}). Inspiré du switch sur 64
-cases dans `primecount/src/Sieve.cpp::cross_off`.
+**Counter array Kim DELIBÉRÉMENT non adopté** : notre `prefix_counts` est
+déjà 0.1 % CPU (build seul, lookups O(1)) et `tail_ext_emit` fait des
+queries non-monotones (pl_idx décroissant per ei → n peut décroître). Le
+counter array Kim suppose un curseur monotone. Bénéfice marginal vs coût
+sur cross_off_count.
 
-Implémentation Rust :
-1. Voir le bitset comme `&mut [u8]` via `from_raw_parts_mut(bits as *mut u8, W30_WORDS * 8)`
-2. Dispatcher sur `p % 30` (lookup table de 30 entrées → group_index 0..8)
-3. Chaque groupe a son inner loop déroulé par 8 avec **bit positions immédiates** (`& !(1u8 << 0)`, ..., `& !(1u8 << 7)`)
-4. `delta_group[]` chargé en 8 stack locals (registres)
-5. Pre-roll (≤ 7 partial steps) pour aligner à j=0, puis unrolled cycles, puis tail
+Tests : 47 lib + 6 main passent ; 2 nouveaux tests bit-exact + cleared-exact
+(`cross_off_pd_unrolled_matches_cross_off_pd`,
+`cross_off_count_pd_unrolled_matches_cross_off_count_pd`) couvrent les
+8 groupes × 36 primes × 7 lo values. π et tous les counters S2_hard
+inchangés (bi_leaf_hits, ext_emitted, ext_clamped, prefix_fills,
+bulk_active_sum).
 
-**Gain attendu Phase 1** : 1.5-2× sur rest_plain_xoff = ~3-4 % wall.
+---
 
-POC du groupe 0 (réverté) a sauvé 2.5 % à 1e15. Extrapolation 8× pour
-tous les groupes → 8-15 % théorique sur le poste, mais en pratique
-4-7 % à cause des primes mid-sized avec peu d'iters.
+## Phase 3 (à faire prochaine session, ≈ 2-3 h) : `cross_off_pd_from_state` (rest_bulk_xoff, 24.3 % CPU)
 
-### Phase 2 : `cross_off_count_pd` (bi_main_xoff, **27.6 % CPU — biggest**)
+Variante avec **state persistant** (`next_m`, `next_j`) entre segments.
+Pattern 8-groupes identique à Phase 1+2A, mais la fonction doit :
 
-Plus complexe : il faut maintenir un compteur. Deux options :
+1. **Catch-up** : avancer `m` de `next_m` jusqu'à `lo` (prime peut être
+   resté inactif sur plusieurs segments). Code actuel :
+   `while m < lo { m += gap_m[j]; j = (j+1) & 7; }`. Le pré-roll Kim-style
+   doit gérer ça avant d'attaquer le main loop.
+2. **Sortie de boucle qui retourne `(m, j)`** au caller (pas juste `return`)
+   pour que `bulk_next_m[k]` / `bulk_next_j[k]` soient mis à jour pour le
+   segment suivant.
+3. Dispatch sur `g` mais préserver `j` à l'entrée et à la sortie : la
+   signature est `fn(self, lo, p, pd, next_m, next_j) -> (next_m, next_j)`
+   (cf [src/segment.rs:754](src/segment.rs#L754)).
 
-**Option A — counter array Kim-style** (préféré). Au lieu de notre
-`prefix_counts` reconstruit (`fill_prefix_counts` à chaque tail emit),
-on maintient un `counter[i]` qui contient le nombre de bits set dans
-l'intervalle `[i * counter_dist, (i+1) * counter_dist)`. À chaque
-cross-off avec count : `counter[m >> log2_dist] -= is_bit`.
+**Gain attendu Phase 3** : 1.3-1.5× sur rest_bulk_xoff = **~4-5 % wall** au
+total. Modeste car les primes bulk font typiquement 1-3 cross-offs/seg
+(pas de boucle déroulée qui amortit), donc l'optim profite surtout du
+byte-write + dispatch direct.
 
-Le `count(stop)` lit `counter[stop >> log2_dist]` + popcount du résidu.
-Pas de rebuild. Voir `primecount/src/Sieve.cpp::cross_off_count` et
-`Sieve_count_stop.hpp`.
+Call site : [src/dr/hard.rs:766](src/dr/hard.rs#L766) — boucle `for k in 0..target_end`.
 
-Refonte de `count_primes_upto_int_m` aussi (il opère via `MonoCount` qui
-n'aurait plus de raison d'être — remplaçable par counter array lookup).
-
-**Option B — garder `prefix_counts`**, ajouter juste le déroulage par 8
-(pas le compteur incrémental). Plus simple mais on n'élimine pas les 33 %
-CPU de `tail_ext_emit`. Demi-gain.
-
-**Gain attendu Phase 2 (Option A)** :
-- bi_main_xoff cross-off déroulé : 1.5-2× → 6-7 % wall
-- tail_ext_emit avec counter array (plus de prefix rebuild) : 1.3-1.5× → 3-4 % wall
-- **Cumulé : ~10 % wall**
-
-### Phase 3 : `cross_off_pd_from_state` (rest_bulk_xoff, 20.4 % CPU)
-
-Variante avec state persistant (next_m, next_j). Adapter le pattern
-8-groupes en gérant la résumption. Plus subtil parce que le state est
-mémorisé entre segments et il faut reprendre à la bonne position.
-
-**Gain attendu Phase 3** : 1.3-1.5× → 4-5 % wall.
-
-### Cumul total attendu : **15-20 % wall** → 1e17 wall ≈ 41-43 s sur 9300HF (vs 7.68 s Kim).
+### Cumul Phase 1+2A+3 attendu : **20-25 % wall** → 1e17 wall ≈ 35-37 s sur 9300HF (vs 7.68 s Kim, soit ~4.6×).
 
 ---
 
@@ -208,13 +216,27 @@ Vérifiables via `pd.bit_seq` au runtime pour chaque p donné. Pour la
 session POC j'ai vérifié group 0 et group 7.
 
 **Garde-fou non-régression** : tester à chaque phase :
-- `cargo test --release`
+- `cargo test --release` (les tests `*_unrolled_matches_*` cassent vite si bit_seq mal dérivé)
 - `target/release/primerivat 1e13 1e15` (sanity π)
 - `--dr-profile 1e15` (α=1) et `--dr-profile 1e17` (α=2) sur Win + WSL
 - ext_emitted, bi_leaf_hits, ext_clamped, prefix_fills, bulk_active_sum **doivent rester identiques** (sinon bug de comptage)
 - bench croisé sur 13450HX (α=1) avant push
   - notre 13450HX baseline post-cascade : 140 s à 1e18 α=1
   - régression > 2 % à α=1 ⇒ debug ou conditionnement par α
+
+**Piège codegen (à reproduire pour Phase 3)** : pour les variantes count,
+le macro per-step doit faire `*bits.get_unchecked_mut(g) &= !mask` après
+une lecture explicite séparée. **Ne pas** écrire `*bits.get_unchecked_mut(g)
+= byte & !mask` (store via reg) : rustc/LLVM perd le `andb m8, imm8` et
+on régresse +46 % sur le poste. Vérifiable avec `cargo rustc --release
+--lib -- --emit=asm` puis `grep "andb.*\$-2.*\(.*\)"` (chaîne `andb` de
+8 dans la main loop).
+
+**Cadence bench 9300HF** : la machine throttle après ~2 runs consécutifs
+de 50 s. Drift typique +30-65 % wall sur trial 2-3. Bencher **1 run, puis
+pause** avec attention au refroidissement avant chaque trial. Comparer
+trial 1 vs trial 1 (cool) ; les CPU shares restent stables même throttlés
+et donnent un signal d'appoint.
 
 ---
 
