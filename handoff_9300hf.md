@@ -3,13 +3,16 @@
 Pendant à `handoff_13450hx.md`. Note pour la **prochaine session dédiée**
 sur le **i5-9300HF** (4c/8t, 32 KB L1d, 256 KB L2, 8 MB L3, AVX2 only —
 pas d'AVX-512). Écrite le 2026-04-26, mise à jour en fin de session
-**Phase 1 + 2A** Kim-style cross-off déroulé.
+**Phase 1 + 2A** Kim-style cross-off déroulé wirées + **Phase 3** explorée
+puis revertée pour cause de régression sur le bulk.
 
 ---
 
-## État au 2026-04-26 (8 commits cumulés, dernière révision `e2528cf`)
+## État au 2026-04-26 (9 commits cumulés, dernière révision `f43d1b5`)
 
 ```
+f43d1b5 segment: Phase 3 explored — cross_off_pd_from_state_unrolled (not wired)
+a8aa681 docs: refresh 9300HF handoff for post-Phase-1+2A state
 e2528cf segment: Kim-style 8-way unrolled cross_off_count for bi_main (Phase 2A)
 66ce0b1 segment: Kim-style 8-way unrolled cross-off for rest_plain_xoff (Phase 1)
 d7ecaa4 docs: refresh 9300HF handoff for post-7bb4099 state
@@ -112,22 +115,22 @@ CPU 263 s / wall 46.5 s = 5.66× sur 8 threads = **71 % efficient**.
 
 > Le drop d'efficacité Rayon (78 → 71 %) post-2A est attendu : on a éliminé
 > ~64 s de CPU sur `bi_main_xoff`, mais le wall ne descend que ~7 s parce
-> que les autres bands sont saturées par `rest_bulk_xoff` (toujours rolled)
-> et `tail_ext_emit`. Phase 3 (rest_bulk déroulé) devrait reéquilibrer.
+> que les autres bands sont saturées par `rest_bulk_xoff` et `tail_ext_emit`.
+> Tentative Phase 3 (rest_bulk déroulé) revertée — voir section dédiée.
 
 | poste | CPU | s | type | levier restant |
 |---|---:|---:|---|---|
 | **tail_ext_emit** | **37.3 %** | **98** | popcount-based leaf emit | déjà optimal (LUT 240) |
-| **rest_bulk_xoff** | 24.3 % | 64 | state-resume cross-off (mid-large primes) | **Phase 3** : cross-off déroulé switch-64 |
+| **rest_bulk_xoff** | 24.3 % | 64 | state-resume cross-off (mid-large primes) | rolled, déroulé regressait −25 % (cf section Phase 3) |
 | **bi_main_xoff** | 15.4 % | 41 | counted cross-off (Kim-déroulé Phase 2A) | minor (déroulé fait) |
 | **rest_plain_xoff** | 12.1 % | 32 | plain cross-off (Kim-déroulé Phase 1) | minor (déroulé fait) |
 | tail_advance | 6.2 % | 16 | total_count + bsearches | minor |
 | bi_main_leaf | 4.1 % | 11 | popcount + leaf-fold | déjà optimisé |
 | reste | < 1 % | — | fill, p2, sweep | non |
 
-Cross-off total = **51.8 % CPU** (vs 62 % pré-Phase-1+2A). Le levier #1 restant
-est `rest_bulk_xoff` qui passe de 21 % → 24 % en relatif (mais l'absolu est
-similaire 67→64 s, juste la base CPU a baissé).
+Cross-off total = **51.8 % CPU** (vs 62 % pré-Phase-1+2A). Le poste de tête
+est désormais `tail_ext_emit` (37 %) — déjà optimal. Le 2e levier serait
+`rest_bulk_xoff`, mais la tentative Phase 3 telle quelle régresse.
 
 ---
 
@@ -158,30 +161,45 @@ bulk_active_sum).
 
 ---
 
-## Phase 3 (à faire prochaine session, ≈ 2-3 h) : `cross_off_pd_from_state` (rest_bulk_xoff, 24.3 % CPU)
+## Phase 3 : explorée + revertée (`f43d1b5`, 2026-04-26)
 
-Variante avec **state persistant** (`next_m`, `next_j`) entre segments.
-Pattern 8-groupes identique à Phase 1+2A, mais la fonction doit :
+**Implémentation complète et bit-exact** : `cross_off_pd_from_state_unrolled`
++ macro `impl_xoff_state_unrolled!` + 8 helpers `xoff_state_unrolled_g{0..7}`
+dans [src/segment.rs](src/segment.rs). Test multi-segment chained
+(`cross_off_pd_from_state_unrolled_matches_cross_off_pd_from_state`) qui
+vérifie `(bits, m, j)` à chaque pas sur 36 primes × 5 segments — couvre
+catch-up, pré-roll exit, tail exit, large primes.
 
-1. **Catch-up** : avancer `m` de `next_m` jusqu'à `lo` (prime peut être
-   resté inactif sur plusieurs segments). Code actuel :
-   `while m < lo { m += gap_m[j]; j = (j+1) & 7; }`. Le pré-roll Kim-style
-   doit gérer ça avant d'attaquer le main loop.
-2. **Sortie de boucle qui retourne `(m, j)`** au caller (pas juste `return`)
-   pour que `bulk_next_m[k]` / `bulk_next_j[k]` soient mis à jour pour le
-   segment suivant.
-3. Dispatch sur `g` mais préserver `j` à l'entrée et à la sortie : la
-   signature est `fn(self, lo, p, pd, next_m, next_j) -> (next_m, next_j)`
-   (cf [src/segment.rs:754](src/segment.rs#L754)).
+**Wirage reverté** ([src/dr/hard.rs:769](src/dr/hard.rs#L769)) à cause
+d'une **régression de ~25 % sur `rest_bulk_xoff`** (37.7 % share vs 30.1 %
+post-Phase-2A à 1e15 α=1 ; mesure thermal-indépendante car CPU shares
+sont normalisées au CPU total). Conséquence : wall total ~+8 % vs
+Phase 1+2A.
 
-**Gain attendu Phase 3** : 1.3-1.5× sur rest_bulk_xoff = **~4-5 % wall** au
-total. Modeste car les primes bulk font typiquement 1-3 cross-offs/seg
-(pas de boucle déroulée qui amortit), donc l'optim profite surtout du
-byte-write + dispatch direct.
+**Cause racine** : pour les primes bulk (b_ext..bulk_end, p > x^{1/4}),
+chaque appel ne fait que **0–3 cross-offs en moyenne**. Avec
+`bulk_active_sum = 112 M` paires (k, segment) à 1e15, l'overhead par
+appel (dispatch 8-way `match` + `from_raw_parts_mut` byte-view +
+formule de recovery `(m, j) = lo + g*30 + w30res_p[j]`) ajoute ~50 ns/call
+soit ~5 s de coût pur, supérieur au gain par-itération du déroulage.
 
-Call site : [src/dr/hard.rs:766](src/dr/hard.rs#L766) — boucle `for k in 0..target_end`.
+**Code conservé** dans `segment.rs` comme matériel de référence pour une
+future tentative à seuil conditionnel (cf section follow-ups).
 
-### Cumul Phase 1+2A+3 attendu : **20-25 % wall** → 1e17 wall ≈ 35-37 s sur 9300HF (vs 7.68 s Kim, soit ~4.6×).
+### Lesson pour Phase 3 v2
+
+Le pattern Kim-style est **pénalisant pour les call-sites où le nombre
+moyen d'itérations par appel est faible**. Pour les primes bulk c'est
+~1-3 ; pour les Phases 1 et 2A c'est plusieurs centaines (segment
+balayé via la main loop déroulée). Toute future Phase 3 doit donc soit :
+- **Splitter par seuil** : `p < W30_SEG * 8 / 30 ≈ 140 000` → unrolled
+  (au moins ~1 cycle complet par segment), `p ≥ 140 000` → rolled.
+  Implémenter via un `partition_point` sur les primes bulk + 2 boucles.
+- **Réduire l'overhead par appel** : éviter `from_raw_parts_mut` à chaque
+  appel (le faire une fois par segment au-dessus de la boucle), passer
+  juste `bits_bytes` aux 8 helpers ; éliminer la recovery `(m, j)` en
+  retournant `(g, j)` au caller qui maintiendrait directement `(g, j)`
+  comme state au lieu de `(m, j)`.
 
 ---
 
@@ -256,9 +274,41 @@ target/release/primerivat -b 16 ...                   # band mult override
 
 ---
 
+## Follow-ups ouverts pour la prochaine session (par ordre de priorité)
+
+1. **Multi-template AND pre-sieve** (style Kim `Sieve_pre_sieve.hpp`) —
+   chaîne de 7 petits templates AND'd dans le sieve, chacun ≤ 4757 B
+   pour rester sous L1d (32 KB) avec le sieve courant (17 480 B).
+   Couvre primes 13, puis paires {17,19}, {23,29}, …, {67,71}. Gain
+   estimé **5–10 % wall**, ~300 LOC. Garde-fou : tester que
+   `template_bytes + sieve_bytes ≤ 32 KB` strictement (la tentative
+   C=7 mono-template = 17017 B avait régressé +5.5 % par cache miss).
+
+2. **Phase 3 v2 avec seuil conditionnel** (cf section ci-dessus). Effort
+   faible (~30 LOC : `partition_point` + 2 boucles dans hard.rs). Gain
+   estimé modeste (1–2 % wall) car la moitié des primes bulk reste
+   rolled. Tenter seulement si la Mesure WSL post-2A confirme qu'on est
+   loin de Kim.
+
+3. **Re-bench WSL post-`a8aa681`** pour figer le facteur Kim définitif
+   (Win→WSL ~6-7 % wall). Estimation actuelle 4.5× / 6.05× à confirmer.
+
+4. **Piste D** — étendre le frontier `b_ext` vers `b_limit` pour basculer
+   plus de primes en chemin bulk (avec son scaling de coût). Effort
+   élevé, gain plausible 5–10 %.
+
+5. **Piste C** — sub-task Rayon dans `bi_main` pour récupérer les ~10
+   points de % d'efficacité Rayon perdus à α=2 (78 → 71 % post-2A).
+
+6. **README refresh** : la perf table publiée est figée à `9e9162a`
+   (avant cascade). Update au state cool actuel.
+
+---
+
 ## Mémoire principale
 
 `~/.claude/projects/c--Users-Kbda9-projet-primerivat/memory/project_s2_hard_refactor.md`
 
-Mise à jour le 2026-04-26 avec : POC group 0 réverté, leçon cache L1
-template, source primecount sur disque local.
+Mise à jour le 2026-04-26 avec : Phase 1+2A landed (66ce0b1, e2528cf),
+chiffres cool définitifs (1e15 −15.8 %, 1e17 −13.4 %), Phase 3 explored+reverted
+(f43d1b5) avec rationale du seuil conditionnel pour Phase 3 v2.
