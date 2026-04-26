@@ -1,0 +1,10 @@
+# Force LF for shell/PowerShell scripts (must run on Linux too).
+*.ps1 text eol=lf
+*.sh  text eol=lf
+
+# Force CRLF for Windows-native scripts.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Default: let git auto-detect text/binary, normalise to LF in repo.
+* text=auto
