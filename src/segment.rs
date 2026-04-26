@@ -742,6 +742,48 @@ impl WheelSieve30 {
         cleared
     }
 
+    /// Like [`cross_off_count_pd`] but Kim-style unrolled: dispatches on the
+    /// prime's residue group `g = pd.bit_seq[0]` to one of 8 specialised inner
+    /// loops with bit positions hardcoded as immediates. Each cleared bit
+    /// turns into 4 ops (load byte, extract bit, masked store, accumulate)
+    /// vs ~12 ops in the rolled version (table lookups + word/bit reconstruction).
+    #[inline]
+    pub fn cross_off_count_pd_unrolled(
+        &mut self,
+        lo: u64,
+        p: u64,
+        pd: &WheelPrimeData,
+    ) -> u64 {
+        debug_assert_eq!(lo % 30, 0);
+        let k0 = (lo + p - 1) / p;
+        let k1 = wheel30_next_k(k0);
+        let m_start = k1 * p;
+        if m_start >= lo + W30_SEG as u64 {
+            return 0;
+        }
+        let j0 = W30_IDX[(k1 % 30) as usize] as usize;
+        let local0 = (m_start - lo) as usize;
+        let group_start = local0 / 30;
+
+        let bits_bytes: &mut [u8] = unsafe {
+            core::slice::from_raw_parts_mut(self.bits.as_mut_ptr() as *mut u8, W30_WORDS * 8)
+        };
+
+        let g = pd.bit_seq[0] as usize;
+        let dg = &pd.delta_group;
+        match g {
+            0 => xoff_count_unrolled_g0(bits_bytes, group_start, j0, dg),
+            1 => xoff_count_unrolled_g1(bits_bytes, group_start, j0, dg),
+            2 => xoff_count_unrolled_g2(bits_bytes, group_start, j0, dg),
+            3 => xoff_count_unrolled_g3(bits_bytes, group_start, j0, dg),
+            4 => xoff_count_unrolled_g4(bits_bytes, group_start, j0, dg),
+            5 => xoff_count_unrolled_g5(bits_bytes, group_start, j0, dg),
+            6 => xoff_count_unrolled_g6(bits_bytes, group_start, j0, dg),
+            7 => xoff_count_unrolled_g7(bits_bytes, group_start, j0, dg),
+            _ => unsafe { std::hint::unreachable_unchecked() },
+        }
+    }
+
     /// Like [`cross_off_pd`] but resumes from a stored `(next_m, next_j)`
     /// state instead of recomputing the first multiple with a 64-bit division.
     ///
@@ -984,6 +1026,82 @@ impl_xoff_unrolled!(xoff_unrolled_g5, 5, 3, 7, 1, 6, 0, 4, 2);
 impl_xoff_unrolled!(xoff_unrolled_g6, 6, 2, 3, 7, 0, 4, 5, 1);
 impl_xoff_unrolled!(xoff_unrolled_g7, 7, 6, 5, 4, 3, 2, 1, 0);
 
+// Counted variants. Same shape as `impl_xoff_unrolled!` but each byte write
+// reads the byte first to extract the previous bit (1 ↔ "was set"), AND-stores
+// the cleared byte, and accumulates the cleared count. Kim's `cross_off_count`
+// (Sieve.cpp:451–596) uses the same UNSET_BIT macro chained 8 times per cycle.
+macro_rules! impl_xoff_count_unrolled {
+    ($name:ident, $b0:literal, $b1:literal, $b2:literal, $b3:literal,
+                  $b4:literal, $b5:literal, $b6:literal, $b7:literal) => {
+        #[inline]
+        fn $name(bits: &mut [u8], group_start: usize, j0: usize, dg: &[u32; 8]) -> u64 {
+            const BITS: [u8; 8] = [$b0, $b1, $b2, $b3, $b4, $b5, $b6, $b7];
+            let d0 = dg[0] as usize;
+            let d1 = dg[1] as usize;
+            let d2 = dg[2] as usize;
+            let d3 = dg[3] as usize;
+            let d4 = dg[4] as usize;
+            let d5 = dg[5] as usize;
+            let d6 = dg[6] as usize;
+            let d7 = dg[7] as usize;
+            let d_arr = [d0, d1, d2, d3, d4, d5, d6, d7];
+            let max_offset = d0 + d1 + d2 + d3 + d4 + d5 + d6;
+            let group_end = W30_GROUPS;
+
+            let mut g = group_start;
+            let mut cleared: u64 = 0;
+
+            // Per-step: extract the previous bit value (for the cleared
+            // counter), then clear it via an in-place `&=` so rustc emits a
+            // single `andb m8, imm8` RMW instead of separate load + store.
+            macro_rules! unset {
+                ($pos:expr, $bit:expr) => {{
+                    let byte = unsafe { *bits.get_unchecked($pos) };
+                    cleared += ((byte >> $bit) & 1) as u64;
+                    unsafe { *bits.get_unchecked_mut($pos) &= !(1u8 << $bit); }
+                }};
+            }
+
+            // Pre-roll: complete the partial cycle from j0..8 step by step.
+            for jj in j0..8 {
+                if g >= group_end { return cleared; }
+                unset!(g, BITS[jj]);
+                g += d_arr[jj];
+            }
+
+            // Main unrolled: full 8-step cycle, no per-step bound check
+            // (max interior write position = g + max_offset < group_end).
+            while g + max_offset < group_end {
+                unset!(g, $b0); g += d0;
+                unset!(g, $b1); g += d1;
+                unset!(g, $b2); g += d2;
+                unset!(g, $b3); g += d3;
+                unset!(g, $b4); g += d4;
+                unset!(g, $b5); g += d5;
+                unset!(g, $b6); g += d6;
+                unset!(g, $b7); g += d7;
+            }
+
+            // Tail: from j=0, step by step until we cross group_end.
+            for jj in 0..8 {
+                if g >= group_end { return cleared; }
+                unset!(g, BITS[jj]);
+                g += d_arr[jj];
+            }
+            cleared
+        }
+    };
+}
+
+impl_xoff_count_unrolled!(xoff_count_unrolled_g0, 0, 1, 2, 3, 4, 5, 6, 7);
+impl_xoff_count_unrolled!(xoff_count_unrolled_g1, 1, 5, 4, 0, 7, 3, 2, 6);
+impl_xoff_count_unrolled!(xoff_count_unrolled_g2, 2, 4, 0, 6, 1, 7, 3, 5);
+impl_xoff_count_unrolled!(xoff_count_unrolled_g3, 3, 0, 6, 5, 2, 1, 7, 4);
+impl_xoff_count_unrolled!(xoff_count_unrolled_g4, 4, 7, 1, 2, 5, 6, 0, 3);
+impl_xoff_count_unrolled!(xoff_count_unrolled_g5, 5, 3, 7, 1, 6, 0, 4, 2);
+impl_xoff_count_unrolled!(xoff_count_unrolled_g6, 6, 2, 3, 7, 0, 4, 5, 1);
+impl_xoff_count_unrolled!(xoff_count_unrolled_g7, 7, 6, 5, 4, 3, 2, 1, 0);
+
 /// Advances wheel-sieve state so that each `m` is the first coprime-to-30
 /// multiple of `p` at or after `next_lo`.
 ///
@@ -1183,6 +1301,51 @@ mod tests {
                 assert_eq!(
                     s_ref.bits, s_new.bits,
                     "Mismatch lo={} p={} (p%30={}, g={})",
+                    lo, p, p % 30, W30_IDX[(p % 30) as usize],
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn cross_off_count_pd_unrolled_matches_cross_off_count_pd() {
+        // Same coverage as cross_off_pd_unrolled_matches_cross_off_pd, plus
+        // verifies the returned `cleared` count matches.
+        let primes_to_test: &[u64] = &[
+            7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71, 73, 79, 83, 89, 97,
+            127, 211, 257, 311, 401, 503, 601, 701, 809, 907,
+            719, 727, 733,
+            12_007, 65_521, 524_287, 524_309,
+        ];
+        let los: &[u64] = &[
+            0,
+            30,
+            60,
+            300,
+            W30_SEG as u64,
+            (W30_SEG as u64) * 7,
+            1_000_000_020,
+        ];
+        for &lo in los {
+            for &p in primes_to_test {
+                let pd = WheelPrimeData::new(p);
+
+                let mut s_ref = WheelSieve30::new();
+                s_ref.fill(lo, &[]);
+                let mut s_new = WheelSieve30::new();
+                s_new.bits.copy_from_slice(&s_ref.bits);
+
+                let cleared_ref = s_ref.cross_off_count_pd(lo, p, &pd);
+                let cleared_new = s_new.cross_off_count_pd_unrolled(lo, p, &pd);
+
+                assert_eq!(
+                    cleared_ref, cleared_new,
+                    "cleared mismatch lo={} p={} (p%30={}, g={})",
+                    lo, p, p % 30, W30_IDX[(p % 30) as usize],
+                );
+                assert_eq!(
+                    s_ref.bits, s_new.bits,
+                    "bits mismatch lo={} p={} (p%30={}, g={})",
                     lo, p, p % 30, W30_IDX[(p % 30) as usize],
                 );
             }

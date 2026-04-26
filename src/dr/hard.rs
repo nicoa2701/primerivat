@@ -726,7 +726,7 @@ pub fn s2_hard_sieve_par(
 
                     delta[bi] += running_total;
                     running_total -=
-                        sieve.cross_off_count_pd(lo, pb, &pb_data[bi]) as i64;
+                        sieve.cross_off_count_pd_unrolled(lo, pb, &pb_data[bi]) as i64;
                 }
                 stats.bi_main_ns += t_bi.elapsed().as_nanos() as u64;
 
