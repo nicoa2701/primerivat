@@ -251,6 +251,18 @@ pub const W30_WORDS: usize = (W30_BITS + 63) / 64; // 2 185
 /// The 8 residues coprime to 30 in [0, 30).
 const W30_RESIDUES: [u8; 8] = [1, 7, 11, 13, 17, 19, 23, 29];
 
+/// Replaces `W30_RESIDUES.partition_point(|&r| r ≤ rem)` (3-branch search on
+/// an 8-element array) with a single 30-byte L1 load. Used in the popcount
+/// hot path of `count_primes_upto_int{,_m}`, which is called ≈ 1.7 G times at
+/// x=1e17 α=2 — a 2-3 cycle saving per call adds up to a few seconds wall.
+/// Entry r = number of W30_RESIDUES values ≤ r, for r ∈ [0, 30).
+const W30_J_FOR_REM: [u8; 30] = [
+    0, 1, 1, 1, 1, 1, 1, 2,  // r =  0 ..  7
+    2, 2, 2, 3, 3, 4, 4, 4,  // r =  8 .. 15
+    4, 5, 5, 6, 6, 6, 6, 7,  // r = 16 .. 23
+    7, 7, 7, 7, 7, 8,         // r = 24 .. 29
+];
+
 /// Map r → j such that W30_RESIDUES[j] == r  (255 if r is not coprime to 30).
 pub const W30_IDX: [u8; 30] = [
     255, 0,   255, 255, 255, 255, 255, 1,
@@ -794,7 +806,7 @@ impl WheelSieve30 {
         let group = local / 30;
         let rem   = local % 30;
         // Number of wheel positions j with W30_RESIDUES[j] ≤ rem.
-        let j = W30_RESIDUES.partition_point(|&r| (r as usize) <= rem);
+        let j = W30_J_FOR_REM[rem] as usize;
         let last_bit = if j == 0 {
             if group == 0 { return 0; }
             group * 8 - 1
@@ -836,7 +848,7 @@ impl WheelSieve30 {
         let local = (n - lo) as usize;
         let group = local / 30;
         let rem = local % 30;
-        let j = W30_RESIDUES.partition_point(|&r| (r as usize) <= rem);
+        let j = W30_J_FOR_REM[rem] as usize;
         let last_bit = if j == 0 {
             if group == 0 { return 0; }
             group * 8 - 1
