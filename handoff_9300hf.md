@@ -7,28 +7,47 @@ pas d'AVX-512). Écrite le 2026-04-26 à la fin d'une session d'analyse
 
 ---
 
-## État au 2026-04-26 (3 commits non encore poussés)
+## État au 2026-04-26 (5 commits poussés cette session, dernière révision `47a8e57`)
 
 ```
+47a8e57 segment: drop orphan count_monotonic
+7bb4099 segment: use 240-block masks for wheel counts
+25f6f9e docs: add per-CPU handoff notes for follow-up sessions
 9772571 cpu_detect: wrap __cpuid calls in unsafe for older Rust toolchains
 8349c91 S2_hard: replace 8-elt partition_point with 30-byte lookup in popcount hot path
 85426ab profile: split bi_main timer into leaf-emit vs xoff+bookkeeping
 ```
 
-`8349c91` est le seul gain de perf : **−12 % wall à 1e15 / −8 % à 1e17**
-sur 9300HF, universel α=1/α=2. Lookup 30-byte vs partition_point 8-elt
-dans `count_primes_upto_int{,_m}` (1.7 G calls à 1e17).
+Deux gains de perf empilés (universels α=1/α=2) :
+- `8349c91` (Piste A2) — remplace `partition_point` 8-elt par lookup 30-byte
+  `W30_J_FOR_REM` dans `count_primes_upto_int{,_m}`. **−12 % wall à 1e15 / −8 % à 1e17**.
+- `7bb4099` (Piste A2 raffinée Kim-style) — remplace le 30-byte LUT + arith
+  (`/30`, `%30`, reconstruction `last_bit`, `>>6`, shift) par une seule table
+  `W30_MASK_LEQ_240[u64]` (1920 B, tient en L1d). 240 = 8 résidus × 30 = un mot
+  u64 entier, donc `local/240` = word index, `local%240` = mask key. Réduit les
+  deux fonctions count à 2 div/mod + 1 LUT load. **−10 % wall à 1e15 / −8 % à 1e17**.
+  Knock-on : `bi_main_xoff` passe de 32 % à 27 % CPU share via inlining compilo.
+- `47a8e57` — suppression de `count_monotonic` orphelin (son seul caller
+  `count_primes_upto_int_m` a été inliné dans `7bb4099`).
 
-**Baseline post-A2 actuel (en attendant le gros refacto) :**
+**Baseline 9300HF post-`7bb4099` (Win, défaut `-b 16`) :**
 
-| x | wall (Win) | wall (WSL Linux) | régime |
-|---|---:|---:|---|
-| 1e15 | 2.42 s | 2.24 s | α=1 |
-| 1e17 | 54.2 s | 51.0 s | α=2 |
-| primecount 1e17 (WSL, même CPU) | — | 7.68 s | DR (`-d`) |
+| x | wall | régime |
+|---|---:|---|
+| 1e15 | 2.17 s | α=1 |
+| 1e17 | 49.77 s | α=2 |
 
-**Écart implémentation pur vs Kim : 6.6× à 1e17** (même OS, même
-machine — l'OS ne vaut que ~6 % wall). Efficacité Rayon identique 78 %.
+**Comparaison vs primecount** (mesure WSL en début de session, pré-`7bb4099`) :
+
+| x | nous WSL | primecount WSL | facteur |
+|---|---:|---:|---:|
+| 1e15 | 2.24 s | 0.407 s | 5.5× |
+| 1e17 | 51.0 s | 7.68 s | 6.6× |
+
+> L'écart réel post-`7bb4099` est probablement ~6.0–6.2× à 1e17 (back-calc :
+> 51.0 × 0.92 ≈ 46.8 s WSL, 46.8 / 7.68 ≈ 6.1×). À re-mesurer en WSL pour
+> confirmer. WSL vs Windows = ~6 % wall, efficacité Rayon identique 78 %.
+> L'écart est *implémentation*, pas OS.
 
 ---
 
@@ -74,9 +93,13 @@ Compilé depuis le même tree, build dir = `c:/Users/Kbda9/projet/3rivat3/primec
 
 ---
 
-## Profile détaillé à 1e17 α=2 (post-A2, WSL)
+## Profile détaillé à 1e17 α=2 (post-`8349c91`, WSL)
 
 CPU 319 s / wall 51 s = 6.26× sur 8 threads = **78 % efficient**.
+
+> Mesuré pré-`7bb4099`. Post-`7bb4099` les shares restent à ~1 pp près
+> (bi_main_xoff 32 % → 27 %, déjà reflété ci-dessous puisque la mesure
+> a été faite après `8349c91` qui avait déjà rebattu les cartes via inlining).
 
 | poste | CPU | s | type | levier |
 |---|---:|---:|---|---|
