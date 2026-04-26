@@ -732,8 +732,11 @@ pub fn s2_hard_sieve_par(
 
                 let t_plain = Instant::now();
                 // ── bi ∈ [b_limit, b_ext): plain cross-off (no leaves) ──────
+                // Kim-style 8-way dispatch with bit positions baked as
+                // immediates; replaces the per-bit `bit_seq[j]` lookup +
+                // word/bit reconstruction with a single `andb m8, imm8`.
                 for bi in b_limit..b_ext {
-                    sieve.cross_off_pd(lo, primes[c + bi], &pb_data[bi]);
+                    sieve.cross_off_pd_unrolled(lo, primes[c + bi], &pb_data[bi]);
                 }
                 stats.rest_plain_ns += t_plain.elapsed().as_nanos() as u64;
 

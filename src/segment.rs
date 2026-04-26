@@ -816,6 +816,51 @@ impl WheelSieve30 {
         }
     }
 
+    /// Like [`cross_off_pd`] but Kim-style: dispatches on the prime's residue
+    /// group (`g = pd.bit_seq[0]`, equivalent to `W30_IDX[p % 30]`) to one of
+    /// 8 specialised inner loops with bit positions hardcoded as immediates.
+    ///
+    /// Each inner loop has the same shape: a ≤ 7-step pre-roll to align on
+    /// `j = 0`, an 8-step unrolled main loop (one full wheel-30 cycle of the
+    /// prime), then a ≤ 7-step tail. The main loop writes into the
+    /// `[u8]` byte view of `self.bits`, replacing the per-iteration
+    /// `bit_seq[j]` lookup + word/bit reconstruction with a single `andb m8, imm8`.
+    #[inline]
+    pub fn cross_off_pd_unrolled(&mut self, lo: u64, p: u64, pd: &WheelPrimeData) {
+        debug_assert_eq!(lo % 30, 0);
+        let k0 = (lo + p - 1) / p;
+        let k1 = wheel30_next_k(k0);
+        let m_start = k1 * p;
+        if m_start >= lo + W30_SEG as u64 {
+            return;
+        }
+        let j0 = W30_IDX[(k1 % 30) as usize] as usize;
+        let local0 = (m_start - lo) as usize;
+        let group_start = local0 / 30;
+
+        // Bytes view: 1 byte = 1 group of 30 = 8 wheel positions. The 4 bytes
+        // past W30_GROUPS are padding (kept 0 by `fill`); we never write into
+        // them because the per-group fns bound writes to W30_GROUPS.
+        let bits_bytes: &mut [u8] = unsafe {
+            core::slice::from_raw_parts_mut(self.bits.as_mut_ptr() as *mut u8, W30_WORDS * 8)
+        };
+
+        // pd.bit_seq[0] = W30_IDX[(1*p) % 30] = group index g ∈ 0..8.
+        let g = pd.bit_seq[0] as usize;
+        let dg = &pd.delta_group;
+        match g {
+            0 => xoff_unrolled_g0(bits_bytes, group_start, j0, dg),
+            1 => xoff_unrolled_g1(bits_bytes, group_start, j0, dg),
+            2 => xoff_unrolled_g2(bits_bytes, group_start, j0, dg),
+            3 => xoff_unrolled_g3(bits_bytes, group_start, j0, dg),
+            4 => xoff_unrolled_g4(bits_bytes, group_start, j0, dg),
+            5 => xoff_unrolled_g5(bits_bytes, group_start, j0, dg),
+            6 => xoff_unrolled_g6(bits_bytes, group_start, j0, dg),
+            7 => xoff_unrolled_g7(bits_bytes, group_start, j0, dg),
+            _ => unsafe { std::hint::unreachable_unchecked() },
+        }
+    }
+
     /// Returns the total number of set bits.
     #[inline]
     pub fn total_count(&self) -> u64 {
@@ -865,6 +910,79 @@ impl WheelSieve30 {
 impl Default for WheelSieve30 {
     fn default() -> Self { Self::new() }
 }
+
+// Kim-style unrolled cross-off helpers. One specialisation per residue group
+// `g = W30_IDX[p % 30] ∈ 0..8`, each with the bit-position sequence baked in
+// as immediates. Generated via `impl_xoff_unrolled!`.
+//
+// Layout in [u8] view: 1 byte covers 8 wheel positions of one group of 30
+// integers. `dg[j]` is the byte-index advance from wheel position `j` to
+// `(j+1) mod 8` (= `(w30res_p[j] + 30*WHEEL30_GAPS[j]/30 - w30res_p[(j+1)%8])
+// / 30`, equivalent to `(p/30)*WHEEL30_GAPS[j] + wheel_corr[g][j]` in Kim).
+// One full 8-step cycle advances by `sum(dg) == p` bytes.
+macro_rules! impl_xoff_unrolled {
+    ($name:ident, $b0:literal, $b1:literal, $b2:literal, $b3:literal,
+                  $b4:literal, $b5:literal, $b6:literal, $b7:literal) => {
+        #[inline]
+        fn $name(bits: &mut [u8], group_start: usize, j0: usize, dg: &[u32; 8]) {
+            const BITS: [u8; 8] = [$b0, $b1, $b2, $b3, $b4, $b5, $b6, $b7];
+            let d0 = dg[0] as usize;
+            let d1 = dg[1] as usize;
+            let d2 = dg[2] as usize;
+            let d3 = dg[3] as usize;
+            let d4 = dg[4] as usize;
+            let d5 = dg[5] as usize;
+            let d6 = dg[6] as usize;
+            let d7 = dg[7] as usize;
+            let d_arr = [d0, d1, d2, d3, d4, d5, d6, d7];
+            // Max byte offset reached *during* one 8-step cycle (writes happen
+            // at g, g+d0, g+d0+d1, …, g+d0+…+d6). Used as the unroll guard.
+            let max_offset = d0 + d1 + d2 + d3 + d4 + d5 + d6;
+            let group_end = W30_GROUPS;
+
+            let mut g = group_start;
+
+            // Pre-roll: complete the partial cycle from j0..8 step by step.
+            for jj in j0..8 {
+                if g >= group_end { return; }
+                unsafe { *bits.get_unchecked_mut(g) &= !(1u8 << BITS[jj]); }
+                g += d_arr[jj];
+            }
+
+            // Main unrolled loop: each iteration is one full wheel-30 cycle
+            // and advances `g` by exactly `p` bytes. Guard ensures the 7th
+            // (last interior) write position `g + max_offset` stays < group_end.
+            while g + max_offset < group_end {
+                unsafe {
+                    *bits.get_unchecked_mut(g) &= !(1u8 << $b0); g += d0;
+                    *bits.get_unchecked_mut(g) &= !(1u8 << $b1); g += d1;
+                    *bits.get_unchecked_mut(g) &= !(1u8 << $b2); g += d2;
+                    *bits.get_unchecked_mut(g) &= !(1u8 << $b3); g += d3;
+                    *bits.get_unchecked_mut(g) &= !(1u8 << $b4); g += d4;
+                    *bits.get_unchecked_mut(g) &= !(1u8 << $b5); g += d5;
+                    *bits.get_unchecked_mut(g) &= !(1u8 << $b6); g += d6;
+                    *bits.get_unchecked_mut(g) &= !(1u8 << $b7); g += d7;
+                }
+            }
+
+            // Tail: from j=0, step by step until we cross group_end.
+            for jj in 0..8 {
+                if g >= group_end { return; }
+                unsafe { *bits.get_unchecked_mut(g) &= !(1u8 << BITS[jj]); }
+                g += d_arr[jj];
+            }
+        }
+    };
+}
+
+impl_xoff_unrolled!(xoff_unrolled_g0, 0, 1, 2, 3, 4, 5, 6, 7);
+impl_xoff_unrolled!(xoff_unrolled_g1, 1, 5, 4, 0, 7, 3, 2, 6);
+impl_xoff_unrolled!(xoff_unrolled_g2, 2, 4, 0, 6, 1, 7, 3, 5);
+impl_xoff_unrolled!(xoff_unrolled_g3, 3, 0, 6, 5, 2, 1, 7, 4);
+impl_xoff_unrolled!(xoff_unrolled_g4, 4, 7, 1, 2, 5, 6, 0, 3);
+impl_xoff_unrolled!(xoff_unrolled_g5, 5, 3, 7, 1, 6, 0, 4, 2);
+impl_xoff_unrolled!(xoff_unrolled_g6, 6, 2, 3, 7, 0, 4, 5, 1);
+impl_xoff_unrolled!(xoff_unrolled_g7, 7, 6, 5, 4, 3, 2, 1, 0);
 
 /// Advances wheel-sieve state so that each `m` is the first coprime-to-30
 /// multiple of `p` at or after `next_lo`.
@@ -1023,6 +1141,52 @@ mod tests {
             .collect();
         let got = seg_primes_in(lo, hi);
         assert_eq!(got, expected);
+    }
+
+    #[test]
+    fn cross_off_pd_unrolled_matches_cross_off_pd() {
+        // Covers all 8 residue groups (p%30 ∈ {1,7,11,13,17,19,23,29}) plus a
+        // mix of small/medium/large primes (large = single-bit cross-off per
+        // segment), and several `lo` values to exercise non-zero starting `j0`
+        // and the pre-roll path.
+        let primes_to_test: &[u64] = &[
+            // small (cycle through segment many times)
+            7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71, 73, 79, 83, 89, 97,
+            // medium
+            127, 211, 257, 311, 401, 503, 601, 701, 809, 907,
+            // around sqrt(W30_SEG) ≈ 724
+            719, 727, 733,
+            // large (≤ 1 cross-off per segment)
+            12_007, 65_521, 524_287, 524_309,
+        ];
+        let los: &[u64] = &[
+            0,
+            30,
+            60,
+            300,
+            W30_SEG as u64,
+            (W30_SEG as u64) * 7,
+            1_000_000_020,
+        ];
+        for &lo in los {
+            for &p in primes_to_test {
+                let pd = WheelPrimeData::new(p);
+
+                let mut s_ref = WheelSieve30::new();
+                s_ref.fill(lo, &[]);
+                let mut s_new = WheelSieve30::new();
+                s_new.bits.copy_from_slice(&s_ref.bits);
+
+                s_ref.cross_off_pd(lo, p, &pd);
+                s_new.cross_off_pd_unrolled(lo, p, &pd);
+
+                assert_eq!(
+                    s_ref.bits, s_new.bits,
+                    "Mismatch lo={} p={} (p%30={}, g={})",
+                    lo, p, p % 30, W30_IDX[(p % 30) as usize],
+                );
+            }
+        }
     }
 
     #[test]
