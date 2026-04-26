@@ -319,9 +319,15 @@ fn run_dr_meissel4_profile(x: u128, _threads: usize) {
     }
     // Sub-decomposition of step3 (CPU time summed across Rayon bands; %
     // is relative to the total CPU time in S2_hard, not wall time).
+    // Split bi_main into leaf-emit (bracketed inside `if has_leaf`) and the
+    // residual xoff+bookkeeping. xoff is derived as the difference so the two
+    // rows still sum to the bundled bi_main total.
+    let bi_main_leaf_ns = profile.sweep_bi_main_leaf_ns.min(profile.sweep_bi_main_ns);
+    let bi_main_xoff_ns = profile.sweep_bi_main_ns - bi_main_leaf_ns;
     let sub = [
         ("sweep fill+count   ", profile.sweep_fill_ns),
-        ("bi main (leaf+xoff)", profile.sweep_bi_main_ns),
+        ("bi main leaf       ", bi_main_leaf_ns),
+        ("bi main xoff       ", bi_main_xoff_ns),
         ("rest plain xoff    ", profile.rest_plain_ns),
         ("rest bulk xoff     ", profile.rest_bulk_ns),
         ("tail prefix build  ", profile.tail_prefix_build_ns),

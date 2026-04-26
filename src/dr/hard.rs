@@ -13,6 +13,13 @@ pub struct HardProfile {
     /// together with `n_leaves_ext_emitted` to weigh the leaf vs xoff share.
     pub sweep_bi_main_ns: u64,
 
+    /// Subset of `sweep_bi_main_ns` spent inside `if has_leaf { … }` (popcount
+    /// + hard_ptrs / easy_ptrs walk + fold accumulators). Bracketed only when
+    /// a leaf actually fires, so the timer adds ~2 × n_bi_leaf_hits Instant
+    /// calls (~0.3 % overhead at x=1e17 α=2). The xoff share is derived as
+    /// `sweep_bi_main_ns − sweep_bi_main_leaf_ns` at print time.
+    pub sweep_bi_main_leaf_ns: u64,
+
     // ── bi ∈ [b_limit, n_all) cross-off (split) ───────────────────────────
     /// Plain cross-off bi ∈ [b_limit, b_ext).
     pub rest_plain_ns: u64,
@@ -494,6 +501,7 @@ pub fn s2_hard_sieve_par(
     struct BandStats {
         fill_ns: u64,
         bi_main_ns: u64,
+        bi_main_leaf_ns: u64,
         rest_plain_ns: u64,
         rest_bulk_ns: u64,
         tail_prefix_ns: u64,
@@ -659,6 +667,10 @@ pub fn s2_hard_sieve_par(
                     };
 
                     if has_leaf {
+                        // Bracketed timer: only fires on leaf hits (sparse —
+                        // 7M total at x=1e17 α=2, vs ~3.4 B bi-iterations), so
+                        // the per-bi Instant::now warning above does not apply.
+                        let t_leaf = Instant::now();
                         stats.n_bi_leaf_hits += 1;
                         mono.reset();
                         // Snapshot local phi BEFORE this segment's running_total update
@@ -709,6 +721,7 @@ pub fn s2_hard_sieve_par(
                                     (x / (pb as u128 * primes[new_idx] as u128)) as u64;
                             }
                         }
+                        stats.bi_main_leaf_ns += t_leaf.elapsed().as_nanos() as u64;
                     }
 
                     delta[bi] += running_total;
@@ -938,6 +951,7 @@ pub fn s2_hard_sieve_par(
         let s = &b.9;
         agg.fill_ns           += s.fill_ns;
         agg.bi_main_ns        += s.bi_main_ns;
+        agg.bi_main_leaf_ns   += s.bi_main_leaf_ns;
         agg.rest_plain_ns     += s.rest_plain_ns;
         agg.rest_bulk_ns      += s.rest_bulk_ns;
         agg.tail_prefix_ns    += s.tail_prefix_ns;
@@ -1000,6 +1014,7 @@ pub fn s2_hard_sieve_par(
     let profile = HardProfile {
         sweep_fill_ns:             agg.fill_ns,
         sweep_bi_main_ns:          agg.bi_main_ns,
+        sweep_bi_main_leaf_ns:     agg.bi_main_leaf_ns,
         rest_plain_ns:             agg.rest_plain_ns,
         rest_bulk_ns:              agg.rest_bulk_ns,
         tail_prefix_build_ns:      agg.tail_prefix_ns,
