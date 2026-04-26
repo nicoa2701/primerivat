@@ -251,17 +251,56 @@ pub const W30_WORDS: usize = (W30_BITS + 63) / 64; // 2 185
 /// The 8 residues coprime to 30 in [0, 30).
 const W30_RESIDUES: [u8; 8] = [1, 7, 11, 13, 17, 19, 23, 29];
 
-/// Replaces `W30_RESIDUES.partition_point(|&r| r ≤ rem)` (3-branch search on
-/// an 8-element array) with a single 30-byte L1 load. Used in the popcount
-/// hot path of `count_primes_upto_int{,_m}`, which is called ≈ 1.7 G times at
-/// x=1e17 α=2 — a 2-3 cycle saving per call adds up to a few seconds wall.
-/// Entry r = number of W30_RESIDUES values ≤ r, for r ∈ [0, 30).
-const W30_J_FOR_REM: [u8; 30] = [
-    0, 1, 1, 1, 1, 1, 1, 2,  // r =  0 ..  7
-    2, 2, 2, 3, 3, 4, 4, 4,  // r =  8 .. 15
-    4, 5, 5, 6, 6, 6, 6, 7,  // r = 16 .. 23
-    7, 7, 7, 7, 7, 8,         // r = 24 .. 29
-];
+/// Kim-style mask table for the popcount hot path. `rem240` indexes directly
+/// inside one 240-integer block (= one u64 word), avoiding the old `/ 30`,
+/// `% 30`, wheel-position lookup, and bit-index reconstruction sequence.
+const W30_MASK_LEQ_240: [u64; 240] = build_w30_mask_leq_240();
+
+const fn w30_j_for_rem(rem: usize) -> usize {
+    if rem < 1 {
+        0
+    } else if rem < 7 {
+        1
+    } else if rem < 11 {
+        2
+    } else if rem < 13 {
+        3
+    } else if rem < 17 {
+        4
+    } else if rem < 19 {
+        5
+    } else if rem < 23 {
+        6
+    } else if rem < 29 {
+        7
+    } else {
+        8
+    }
+}
+
+const fn w30_mask_leq_240(rem240: usize) -> u64 {
+    let group = rem240 / 30;
+    let rem = rem240 - group * 30;
+    let j = w30_j_for_rem(rem);
+    let nbits = group * 8 + j;
+    if nbits == 0 {
+        0
+    } else if nbits >= 64 {
+        u64::MAX
+    } else {
+        (1u64 << nbits) - 1
+    }
+}
+
+const fn build_w30_mask_leq_240() -> [u64; 240] {
+    let mut out = [0u64; 240];
+    let mut i = 0;
+    while i < 240 {
+        out[i] = w30_mask_leq_240(i);
+        i += 1;
+    }
+    out
+}
 
 /// Map r → j such that W30_RESIDUES[j] == r  (255 if r is not coprime to 30).
 pub const W30_IDX: [u8; 30] = [
@@ -803,19 +842,8 @@ impl WheelSieve30 {
     pub fn count_primes_upto_int(&self, prefix: &[u32], n: u64, lo: u64) -> u32 {
         debug_assert!(n >= lo && n < lo + W30_SEG as u64);
         let local = (n - lo) as usize;
-        let group = local / 30;
-        let rem   = local % 30;
-        // Number of wheel positions j with W30_RESIDUES[j] ≤ rem.
-        let j = W30_J_FOR_REM[rem] as usize;
-        let last_bit = if j == 0 {
-            if group == 0 { return 0; }
-            group * 8 - 1
-        } else {
-            group * 8 + j - 1
-        };
-        let word = last_bit >> 6;
-        let bit  = last_bit & 63;
-        let mask = u64::MAX >> (63 - bit);
+        let word = local / 240;
+        let mask = W30_MASK_LEQ_240[local % 240];
         prefix[word] + (self.bits[word] & mask).count_ones()
     }
 
@@ -846,16 +874,12 @@ impl WheelSieve30 {
     pub fn count_primes_upto_int_m(&self, stop: &mut MonoCount, n: u64, lo: u64) -> u64 {
         debug_assert!(n >= lo && n < lo + W30_SEG as u64);
         let local = (n - lo) as usize;
-        let group = local / 30;
-        let rem = local % 30;
-        let j = W30_J_FOR_REM[rem] as usize;
-        let last_bit = if j == 0 {
-            if group == 0 { return 0; }
-            group * 8 - 1
-        } else {
-            group * 8 + j - 1
-        };
-        self.count_monotonic(stop, last_bit)
+        let word = local / 240;
+        while stop.w < word {
+            stop.sum += self.bits[stop.w].count_ones() as u64;
+            stop.w += 1;
+        }
+        stop.sum + (self.bits[word] & W30_MASK_LEQ_240[local % 240]).count_ones() as u64
     }
 }
 
