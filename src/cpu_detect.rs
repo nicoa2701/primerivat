@@ -14,19 +14,20 @@
 /// supported (which is vanishingly rare on modern x86_64 parts).
 pub fn cpu_brand() -> String {
     #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
+    #[allow(unused_unsafe)]
     {
         // Probe extended CPUID support first: EAX=0x80000000 returns the
-        // highest extended leaf in EAX. Rust promotes `__cpuid` to a safe
-        // intrinsic on edition 2024 when the target actually has CPUID
-        // (which every x86/x86_64 host since ~1998 has).
-        let max_ext = core::arch::x86_64::__cpuid(0x8000_0000).eax;
+        // highest extended leaf in EAX. CPUID is universally available on
+        // x86_64 (since 1998), so the `unsafe` is trivially sound. Older
+        // stdlibs require the explicit block; recent ones promote it to safe.
+        let max_ext = unsafe { core::arch::x86_64::__cpuid(0x8000_0000) }.eax;
         if max_ext < 0x8000_0004 {
             return "Unknown CPU".to_string();
         }
 
         let mut bytes = [0u8; 48];
         for (i, leaf) in [0x8000_0002u32, 0x8000_0003, 0x8000_0004].iter().enumerate() {
-            let r = core::arch::x86_64::__cpuid(*leaf);
+            let r = unsafe { core::arch::x86_64::__cpuid(*leaf) };
             let base = i * 16;
             bytes[base..base + 4].copy_from_slice(&r.eax.to_le_bytes());
             bytes[base + 4..base + 8].copy_from_slice(&r.ebx.to_le_bytes());
