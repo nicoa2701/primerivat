@@ -54,6 +54,39 @@ pub struct HardProfile {
     /// average-ish measure of how many bulk primes are still being crossed
     /// off in the tail of each band.
     pub n_bulk_active_primes_sum: u64,
+
+    /// Per-band breakdown of the same counters/timers, in band order
+    /// (band 0 = lowest n). Populated by [`s2_hard_sieve_par`] for
+    /// load-balancing diagnostics. Empty `Vec` when not relevant.
+    pub per_band: Vec<BandProfile>,
+}
+
+/// Per-band profile entry. CPU time and counters captured by one Rayon
+/// worker for a single band (segments `[band_lo, band_hi)`).
+///
+/// Used by `--dr-profile` to diagnose load imbalance in S2_hard. At α=2,
+/// ext-easy leaves funnel into the lowest-n bands, capping Rayon scaling.
+#[derive(Default, Clone, Debug)]
+pub struct BandProfile {
+    /// Band index (0 = lowest n).
+    pub band_t: usize,
+    /// First sieve segment in band (inclusive).
+    pub band_lo: u64,
+    /// First sieve segment past band (exclusive).
+    pub band_hi: u64,
+    pub fill_ns: u64,
+    pub bi_main_ns: u64,
+    pub bi_main_leaf_ns: u64,
+    pub rest_plain_ns: u64,
+    pub rest_bulk_ns: u64,
+    pub tail_prefix_ns: u64,
+    pub tail_ext_ns: u64,
+    pub tail_p2_ns: u64,
+    pub tail_advance_ns: u64,
+    pub n_bi_leaf_hits: u64,
+    pub n_ext_emitted: u64,
+    pub n_prefix_fills: u64,
+    pub n_bulk_active_sum: u64,
 }
 
 fn enumerate_hard_leaves(
@@ -954,9 +987,10 @@ pub fn s2_hard_sieve_par(
         p2_band_inits[t] = p2_band_inits[t - 1] + band_sweeps[t - 1].1;
     }
 
-    // ── Accumulate sweep stats across bands. ─────────────────────────────
+    // ── Accumulate sweep stats across bands + collect per-band breakdown. ─
     let mut agg = BandStats::default();
-    for b in &band_sweeps {
+    let mut per_band: Vec<BandProfile> = Vec::with_capacity(num_bands);
+    for (t, b) in band_sweeps.iter().enumerate() {
         let s = &b.9;
         agg.fill_ns           += s.fill_ns;
         agg.bi_main_ns        += s.bi_main_ns;
@@ -971,6 +1005,25 @@ pub fn s2_hard_sieve_par(
         agg.n_ext_emitted     += s.n_ext_emitted;
         agg.n_prefix_fills    += s.n_prefix_fills;
         agg.n_bulk_active_sum += s.n_bulk_active_sum;
+
+        per_band.push(BandProfile {
+            band_t: t,
+            band_lo: band_bounds[t],
+            band_hi: band_bounds[t + 1],
+            fill_ns:           s.fill_ns,
+            bi_main_ns:        s.bi_main_ns,
+            bi_main_leaf_ns:   s.bi_main_leaf_ns,
+            rest_plain_ns:     s.rest_plain_ns,
+            rest_bulk_ns:      s.rest_bulk_ns,
+            tail_prefix_ns:    s.tail_prefix_ns,
+            tail_ext_ns:       s.tail_ext_ns,
+            tail_p2_ns:        s.tail_p2_ns,
+            tail_advance_ns:   s.tail_advance_ns,
+            n_bi_leaf_hits:    s.n_bi_leaf_hits,
+            n_ext_emitted:     s.n_ext_emitted,
+            n_prefix_fills:    s.n_prefix_fills,
+            n_bulk_active_sum: s.n_bulk_active_sum,
+        });
     }
 
     // ── Resolution pass (parallel per band) ──────────────────────────────────
@@ -1036,6 +1089,7 @@ pub fn s2_hard_sieve_par(
         n_leaves_ext_clamped:      total_clamp_count.max(0) as u64,
         n_prefix_fills:            agg.n_prefix_fills,
         n_bulk_active_primes_sum:  agg.n_bulk_active_sum,
+        per_band,
     };
     (s2_total, p2_total, profile)
 }

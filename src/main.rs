@@ -355,6 +355,49 @@ fn run_dr_meissel4_profile(x: u128, _threads: usize) {
             fmt_thousands(profile.n_bulk_active_primes_sum as u128),
         );
     }
+
+    // ── Per-band breakdown (top 10 by total CPU + slowest ratio) ─────────────
+    if !profile.per_band.is_empty() {
+        let mut bands: Vec<(usize, u64, u64, u64, u64, u64, u64)> = profile
+            .per_band
+            .iter()
+            .map(|b| {
+                let total = b.fill_ns + b.bi_main_ns + b.rest_plain_ns + b.rest_bulk_ns
+                    + b.tail_prefix_ns + b.tail_ext_ns + b.tail_p2_ns + b.tail_advance_ns;
+                (b.band_t, b.band_lo, b.band_hi, total, b.tail_ext_ns, b.rest_bulk_ns, b.n_ext_emitted)
+            })
+            .collect();
+        let n_bands = bands.len();
+        let max_band_ns: u64 = bands.iter().map(|b| b.3).max().unwrap_or(0);
+        let mean_band_ns: u64 = if n_bands > 0 {
+            bands.iter().map(|b| b.3).sum::<u64>() / n_bands as u64
+        } else { 0 };
+
+        // Sort by total CPU descending
+        bands.sort_by(|a, b| b.3.cmp(&a.3));
+        let show = bands.len().min(10);
+        println!("    ┌─ Per-band breakdown (top {} of {} by total CPU) ─", show, n_bands);
+        println!("    │  {:>3}  {:>13} → {:<13}  {:>9}  {:>9}  {:>9}  {:>11}",
+                 "t", "lo", "hi", "total ms", "tail_ext", "rest_bulk", "ext_emit");
+        for &(t, lo, hi, total, tail_ext, rest_bulk, ext_emit) in bands.iter().take(show) {
+            println!("    │  {:>3}  {:>13} → {:<13}  {:>9.1}  {:>9.1}  {:>9.1}  {:>11}",
+                t,
+                fmt_thousands(lo as u128),
+                fmt_thousands(hi as u128),
+                (total as f64) / 1e6,
+                (tail_ext as f64) / 1e6,
+                (rest_bulk as f64) / 1e6,
+                fmt_thousands(ext_emit as u128),
+            );
+        }
+        let imbalance = if mean_band_ns > 0 {
+            (max_band_ns as f64) / (mean_band_ns as f64)
+        } else { 1.0 };
+        println!("    └─ slowest band {:.1}× the mean (imbalance ratio); ideal Rayon eff. ≈ {:.0} %",
+                 imbalance,
+                 if imbalance > 0.0 { 100.0 / imbalance } else { 100.0 });
+    }
+
     println!("  total              {}", fmt_elapsed(total));
     println!("  π({}) = {}", fmt_thousands(x), fmt_thousands(result));
 }
