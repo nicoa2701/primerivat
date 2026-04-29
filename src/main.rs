@@ -174,6 +174,7 @@ struct Cli {
     alpha_override: Option<f64>,
     band_mult_override: Option<usize>,
     b_ext_mult_override: Option<f64>,
+    no_deferred_tail_ext: bool,
 }
 
 enum Mode {
@@ -198,6 +199,7 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
     let mut alpha_override: Option<f64> = None;
     let mut band_mult_override: Option<usize> = None;
     let mut b_ext_mult_override: Option<f64> = None;
+    let mut no_deferred_tail_ext: bool = false;
     let mut _used_t_flag = false;
     let mut _used_non_t_option = false;
     let mut mode: Option<Mode> = None;
@@ -245,6 +247,11 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
                 b_ext_mult_override = Some(parse_b_ext_mult(value)?);
                 _used_non_t_option = true;
                 i += 2;
+            }
+            "--no-deferred-tail-ext" => {
+                no_deferred_tail_ext = true;
+                _used_non_t_option = true;
+                i += 1;
             }
             "--hard-leaf-term-max" => {
                 let value = args
@@ -323,6 +330,7 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
         alpha_override,
         band_mult_override,
         b_ext_mult_override,
+        no_deferred_tail_ext,
     })
 }
 
@@ -568,6 +576,9 @@ fn print_usage(program: &str) {
     eprintln!("                     Multiplier on x^(1/4) for the b_ext bulk frontier (Piste D).");
     eprintln!("                     Default 1.0; range [0.1, 10.0]. K>1 grows phi_vec path,");
     eprintln!("                     K<1 grows pi-formula / bulk path.");
+    eprintln!("  --no-deferred-tail-ext");
+    eprintln!("                     Disable the 2-pass deferred tail_ext_emit for heavy bands");
+    eprintln!("                     (α=2 log-scale regime). Default off (deferred path enabled).");
     eprintln!();
     eprintln!("Examples:");
     eprintln!("  {} 1e13", program);
@@ -621,6 +632,10 @@ fn main() {
 
     if let Some(mult) = cli.b_ext_mult_override {
         let _ = rivat3::parameters::set_b_ext_mult_override(mult);
+    }
+
+    if cli.no_deferred_tail_ext {
+        let _ = rivat3::parameters::set_no_deferred_tail_ext_override(true);
     }
 
     match cli.mode {

@@ -1008,6 +1008,26 @@ impl WheelSieve30 {
         }
         stop.sum + (self.bits[word] & W30_MASK_LEQ_240[local % 240]).count_ones() as u64
     }
+
+    /// Snapshot of the sieve bits, suitable for the deferred-tail-ext path
+    /// in `s2_hard_sieve_par`: pass 1 stashes a copy here, pass 2 replays
+    /// `tail_ext_emit` queries against the snapshot via
+    /// [`count_primes_in_segment`].
+    #[inline]
+    pub fn bits_array(&self) -> &[u64; W30_WORDS] { &self.bits }
+}
+
+/// Free-fn equivalent of [`WheelSieve30::count_primes_upto_int`] that reads
+/// from a borrowed `bits` slice instead of `self`. Used by the 2-pass
+/// `s2_hard` deferred-tail-ext path: pass 1 captures `bits` + `prefix` per
+/// segment, pass 2 reuses the snapshots without rebuilding a `WheelSieve30`.
+#[inline]
+pub fn count_primes_in_segment(bits: &[u64], prefix: &[u32], n: u64, lo: u64) -> u32 {
+    debug_assert!(n >= lo && n < lo + W30_SEG as u64);
+    let local = (n - lo) as usize;
+    let word  = local / 240;
+    let mask  = W30_MASK_LEQ_240[local % 240];
+    prefix[word] + (bits[word] & mask).count_ones()
 }
 
 impl Default for WheelSieve30 {

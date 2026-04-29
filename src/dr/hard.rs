@@ -212,7 +212,7 @@ pub fn s2_hard_sieve_par(
     primes: &[u64],
     s2_primes: &[u64], // primes in (∛x, √x] for P2 = Σ(π(x/p) − (π(p)−1))
 ) -> (i128, u128, HardProfile) {
-    use crate::segment::{advance_wheel_primes, MonoCount, WheelPrimeData, WheelSieve30, W30_IDX, W30_SEG, W30_WORDS, wheel30_next_k};
+    use crate::segment::{advance_wheel_primes, count_primes_in_segment, MonoCount, WheelPrimeData, WheelSieve30, W30_IDX, W30_SEG, W30_WORDS, wheel30_next_k};
     use rayon::prelude::*;
     use std::time::Instant;
 
@@ -497,6 +497,21 @@ pub fn s2_hard_sieve_par(
         local_p2: i64,
     }
 
+    // Per-segment snapshot used by the 2-pass deferred-tail-ext path. Heavy
+    // bands (band 0+1 at α=2 / log-scale regime) skip the in-line ext-easy
+    // emission during pass 1 and stash one of these per segment instead;
+    // pass 2 then drains them with a nested par_iter on `ei` once the
+    // light-band threads are free.  Size ≈ 26 KB / segment (W30_WORDS = 2 185).
+    #[derive(Clone)]
+    struct DeferredSeg {
+        bits:            [u64; W30_WORDS],
+        p2_prefix:       [u32; W30_WORDS + 1],
+        lo:              u64,
+        local_p2_offset: i64,
+        adj_lo:          i32,
+        seed_below_lo:   usize,
+    }
+
     // Per-band safe lower bound on p2_band_inits[t], used to widen the
     // ext-easy fold condition. Dusart (1999): π(n) ≥ n/ln(n) for n ≥ 5393.
     // We use that as a rigorous lower bound for p2_band_inits[t] = π(band_lo[t]−1).
@@ -529,16 +544,17 @@ pub fn s2_hard_sieve_par(
     // ── Single parallel sweep per band: accumulate delta + p2_count AND
     // fold leaf contributions into compact band-local accumulators. ───────────
     type BandSweep = (
-        Vec<i64>,           // delta[bi]               (prefix-sum → phi_band_inits)
-        i64,                // p2_count                (prefix-sum → p2_band_inits)
-        i128,               // leaf_partial
-        Vec<i64>,           // bi_contrib[bi]          (size b_ext)
-        i128,               // p2_partial
-        i64,                // p2_q_count              (number of P2 queries in band)
-        i128,               // ext_fold_partial
-        i64,                // ext_fold_count
-        Vec<ExtEasyRec>,    // ext_stored (fallback when band_fold_floor too loose)
-        BandStats,          // fine-grained phase timings + counters
+        Vec<i64>,           //  0: delta[bi]            (prefix-sum → phi_band_inits)
+        i64,                //  1: p2_count             (prefix-sum → p2_band_inits)
+        i128,               //  2: leaf_partial
+        Vec<i64>,           //  3: bi_contrib[bi]       (size b_ext)
+        i128,               //  4: p2_partial
+        i64,                //  5: p2_q_count           (number of P2 queries in band)
+        i128,               //  6: ext_fold_partial
+        i64,                //  7: ext_fold_count
+        Vec<ExtEasyRec>,    //  8: ext_stored (fallback when band_fold_floor too loose)
+        BandStats,          //  9: fine-grained phase timings + counters
+        Vec<DeferredSeg>,   // 10: deferred-tail-ext snapshots (heavy bands only)
     );
 
     #[derive(Default, Clone, Copy)]
@@ -558,6 +574,43 @@ pub fn s2_hard_sieve_par(
         n_bulk_active_sum: u64,
     }
 
+    // Heavy-band selection for the 2-pass deferred-tail-ext path. Heuristic
+    // (POC stage A): bands 0 + 1 only when the log-scale layout is active
+    // (= α=2 clamp regime). Outside α=2, `use_log_scale = false` so the mask
+    // is empty and pass 2 is a no-op — code reverts to single-pass behaviour
+    // bit-for-bit. Disabled entirely via `--no-deferred-tail-ext`.
+    let defer_enabled = !crate::parameters::no_deferred_tail_ext();
+    let is_heavy = |t: usize| -> bool {
+        defer_enabled && use_log_scale && t < 2
+    };
+
+    // Per-band easy iterator init, hoisted out of the per-band closure so the
+    // pass-2 deferred-tail-ext replay can reuse it for heavy bands. Captures
+    // `n_hard, c, a, primes, x` from fn scope.  See pass-1 site below for
+    // the in-band init that primes `easy_ptrs` / `easy_next_n` for ei < a.
+    let init_easy = |ei: usize, blo: u64| -> (usize, u64) {
+        let bi = n_hard + ei;
+        let b  = bi + c + 1;
+        if b >= a || b < 2 { return (a, u64::MAX); }
+        let pb   = primes[b - 1];
+        let pbm1 = primes[b - 2];
+        let band_cnt = if blo == 0 {
+            a - b
+        } else {
+            let max_pl = (x / (pb as u128 * blo as u128)) as u64;
+            primes[b..a].partition_point(|&p| p <= max_pl)
+        };
+        if band_cnt == 0 { return (a, u64::MAX); }
+        let pl_clamp_threshold =
+            (x / (pb as u128 * pbm1 as u128)) as u64;
+        let nonclamp_cnt = primes[b..a]
+            .partition_point(|&p| p <= pl_clamp_threshold);
+        if nonclamp_cnt == 0 { return (a, u64::MAX); }
+        let pl_idx = b + band_cnt.min(nonclamp_cnt) - 1;
+        let next_n = (x / (pb as u128 * primes[pl_idx] as u128)) as u64;
+        (pl_idx, next_n)
+    };
+
     let band_sweeps: Vec<BandSweep> = (0..num_bands)
         .into_par_iter()
         .map(|t| {
@@ -576,6 +629,9 @@ pub fn s2_hard_sieve_par(
             let mut ext_fold_partial: i128      = 0;
             let mut ext_fold_count: i64         = 0;
             let mut ext_stored: Vec<ExtEasyRec> = Vec::new();
+            // Pass-1 deferred snapshots (only populated for heavy bands).
+            let mut deferred: Vec<DeferredSeg>  = Vec::new();
+            let band_is_heavy = is_heavy(t);
 
             let band_lo = band_bounds[t];
             if band_lo > z {
@@ -583,43 +639,17 @@ pub fn s2_hard_sieve_par(
                         p2_partial, p2_q_count,
                         ext_fold_partial, ext_fold_count,
                         ext_stored,
-                        stats);
+                        stats,
+                        deferred);
             }
             let band_hi = band_bounds[t + 1].min(z + W30_SEG as u64);
 
-            // Per-band easy iterator init. In addition to the band's n-range
-            // cap (pl ≤ x/(pb*blo)), we also cap at the NON-CLAMP boundary
+            // Easy iterator init. In addition to the band's n-range cap
+            // (pl ≤ x/(pb*blo)), we also cap at the NON-CLAMP boundary
             // (pl ≤ x/(pb*p_{b-1})) so the hot sweep never iterates over
             // leaves that would just increment ext_clamped_count. Those are
-            // bulk-counted in `total_clamp_count` above.
-            let init_easy = |ei: usize, blo: u64| -> (usize, u64) {
-                let bi = n_hard + ei;
-                let b  = bi + c + 1;
-                if b >= a || b < 2 { return (a, u64::MAX); }
-                let pb = primes[b - 1];
-                let pbm1 = primes[b - 2];
-                // Band n-range constraint.
-                let band_cnt = if blo == 0 {
-                    a - b
-                } else {
-                    let max_pl = (x / (pb as u128 * blo as u128)) as u64;
-                    primes[b..a].partition_point(|&p| p <= max_pl)
-                };
-                if band_cnt == 0 { return (a, u64::MAX); }
-                // Non-clamp constraint (pl ≤ x/(pb*p_{b-1})).
-                let pl_clamp_threshold =
-                    (x / (pb as u128 * pbm1 as u128)) as u64;
-                let nonclamp_cnt = primes[b..a]
-                    .partition_point(|&p| p <= pl_clamp_threshold);
-                if nonclamp_cnt == 0 { return (a, u64::MAX); }
-                // Take the stricter of the two caps. Both are counts of valid
-                // pl in primes[b..a]; pl_idx = b + min(cnt) - 1 is the largest
-                // valid pl.
-                let pl_idx = b + band_cnt.min(nonclamp_cnt) - 1;
-                let next_n = (x / (pb as u128 * primes[pl_idx] as u128)) as u64;
-                (pl_idx, next_n)
-            };
-
+            // bulk-counted in `total_clamp_count` above. (See `init_easy` at
+            // fn scope for the body.)
             let (mut easy_ptrs, mut easy_next_n): (Vec<usize>, Vec<u64>) =
                 (0..n_easy).map(|ei| init_easy(ei, band_lo)).unzip();
 
@@ -849,71 +879,93 @@ pub fn s2_hard_sieve_par(
                 // the ext / p2 loop bodies.
 
                 let t_ext = Instant::now();
-                // ── Ext-easy leaves (bi >= b_ext) ───────────────────────────
-                for ei in far_easy_start..n_easy {
-                    if easy_ptrs[ei] >= a { continue; }
-                    if easy_next_n[ei] >= hi { continue; }
-                    if !p2_prefix_ready {
-                        let t_pref = Instant::now();
-                        sieve.fill_prefix_counts(&mut p2_prefix);
-                        seed_below_lo = if lo < y {
-                            primes.partition_point(|&p| p < lo)
-                        } else { 0 };
-                        stats.tail_prefix_ns +=
-                            t_pref.elapsed().as_nanos() as u64;
-                        stats.n_prefix_fills += 1;
-                        p2_prefix_ready = true;
-                    }
-                    let bi = n_hard + ei;
-                    let b  = bi + c + 1;
-                    let pb = primes[b - 1];
-                    loop {
-                        let pl_idx = easy_ptrs[ei];
-                        if pl_idx >= a { break; }
-                        let n = easy_next_n[ei];
-                        if n >= hi { break; }
-                        if n >= lo {
-                            let raw = sieve.count_primes_upto_int(&p2_prefix, n, lo);
-                            let seed_in_query: i32 = if lo < y {
-                                let j2 = primes.partition_point(|&p| p <= n);
-                                (j2 - seed_below_lo) as i32
+                if band_is_heavy {
+                    // 2-pass deferred path: capture (sieve.bits, p2_prefix,
+                    // local_p2_offset, …) and skip the in-line ext-easy
+                    // emission. Pass 2 will drain `deferred` once the light
+                    // bands have finished, freeing all Rayon threads for the
+                    // nested par_iter on `ei`.
+                    sieve.fill_prefix_counts(&mut p2_prefix);
+                    seed_below_lo = if lo < y {
+                        primes.partition_point(|&p| p < lo)
+                    } else { 0 };
+                    stats.n_prefix_fills += 1;
+                    p2_prefix_ready = true;
+                    deferred.push(DeferredSeg {
+                        bits:            *sieve.bits_array(),
+                        p2_prefix,
+                        lo,
+                        local_p2_offset,
+                        adj_lo,
+                        seed_below_lo,
+                    });
+                } else {
+                    // ── Ext-easy leaves (bi >= b_ext) ───────────────────────
+                    for ei in far_easy_start..n_easy {
+                        if easy_ptrs[ei] >= a { continue; }
+                        if easy_next_n[ei] >= hi { continue; }
+                        if !p2_prefix_ready {
+                            let t_pref = Instant::now();
+                            sieve.fill_prefix_counts(&mut p2_prefix);
+                            seed_below_lo = if lo < y {
+                                primes.partition_point(|&p| p < lo)
                             } else { 0 };
-                            let v = local_p2_offset
-                                + raw as i64
-                                - adj_lo as i64
-                                + seed_in_query as i64;
-                            let b_m1 = (b as i64) - 1;
-                            // Piste 3 guarantees every emitted leaf satisfies
-                            // n ≥ p_{b-1} (clamps bulk-counted before sweep).
-                            // At band 0, band_fold_floor = p2_init[0] exactly,
-                            // so the fold check always succeeds. At bands t>0
-                            // a loose Dusart LB could theoretically force some
-                            // leaves into `ext_stored`, but in practice all
-                            // ext-easy leaves land in band 0 and this path is
-                            // never triggered.
-                            if v >= b_m1 - band_fold_floor {
-                                ext_fold_partial +=
-                                    (v - (b_m1 - 1)) as i128; // V - (b-2)
-                                ext_fold_count += 1;
-                                stats.n_ext_emitted += 1;
-                            } else {
-                                ext_stored.push(ExtEasyRec {
-                                    b_minus_2: (b as i32) - 2,
-                                    raw,
-                                    seed_in_query,
-                                    adj_lo,
-                                    local_p2: local_p2_offset,
-                                });
+                            stats.tail_prefix_ns +=
+                                t_pref.elapsed().as_nanos() as u64;
+                            stats.n_prefix_fills += 1;
+                            p2_prefix_ready = true;
+                        }
+                        let bi = n_hard + ei;
+                        let b  = bi + c + 1;
+                        let pb = primes[b - 1];
+                        loop {
+                            let pl_idx = easy_ptrs[ei];
+                            if pl_idx >= a { break; }
+                            let n = easy_next_n[ei];
+                            if n >= hi { break; }
+                            if n >= lo {
+                                let raw = sieve.count_primes_upto_int(&p2_prefix, n, lo);
+                                let seed_in_query: i32 = if lo < y {
+                                    let j2 = primes.partition_point(|&p| p <= n);
+                                    (j2 - seed_below_lo) as i32
+                                } else { 0 };
+                                let v = local_p2_offset
+                                    + raw as i64
+                                    - adj_lo as i64
+                                    + seed_in_query as i64;
+                                let b_m1 = (b as i64) - 1;
+                                // Piste 3 guarantees every emitted leaf satisfies
+                                // n ≥ p_{b-1} (clamps bulk-counted before sweep).
+                                // At band 0, band_fold_floor = p2_init[0] exactly,
+                                // so the fold check always succeeds. At bands t>0
+                                // a loose Dusart LB could theoretically force some
+                                // leaves into `ext_stored`, but in practice all
+                                // ext-easy leaves land in band 0 and this path is
+                                // never triggered.
+                                if v >= b_m1 - band_fold_floor {
+                                    ext_fold_partial +=
+                                        (v - (b_m1 - 1)) as i128; // V - (b-2)
+                                    ext_fold_count += 1;
+                                    stats.n_ext_emitted += 1;
+                                } else {
+                                    ext_stored.push(ExtEasyRec {
+                                        b_minus_2: (b as i32) - 2,
+                                        raw,
+                                        seed_in_query,
+                                        adj_lo,
+                                        local_p2: local_p2_offset,
+                                    });
+                                }
                             }
+                            if pl_idx <= b {
+                                easy_ptrs[ei] = a;
+                                break;
+                            }
+                            let new_idx = pl_idx - 1;
+                            easy_ptrs[ei]   = new_idx;
+                            easy_next_n[ei] =
+                                (x / (pb as u128 * primes[new_idx] as u128)) as u64;
                         }
-                        if pl_idx <= b {
-                            easy_ptrs[ei] = a;
-                            break;
-                        }
-                        let new_idx = pl_idx - 1;
-                        easy_ptrs[ei]   = new_idx;
-                        easy_next_n[ei] =
-                            (x / (pb as u128 * primes[new_idx] as u128)) as u64;
                     }
                 }
 
@@ -980,9 +1032,117 @@ pub fn s2_hard_sieve_par(
              p2_partial, p2_q_count,
              ext_fold_partial, ext_fold_count,
              ext_stored,
-             stats)
+             stats,
+             deferred)
         })
         .collect();
+    let mut band_sweeps = band_sweeps; // pass 2 mutates ext_fold_* / stats
+
+    // ── Pass 2: deferred-tail-ext replay (heavy bands only) ──────────────────
+    // For each heavy band, drain its `deferred` segments via a NESTED par_iter
+    // on `ei`. The outer pool is now idle (light bands finished in pass 1), so
+    // every Rayon thread can attack the bands-0+1 tail_ext bottleneck without
+    // contention. ei's are independent (each owns its `easy_ptrs[ei]` slot)
+    // so the inner par_iter folds locally and reduces.
+    let pass2_t = Instant::now();
+    type Pass2Out = (usize, i128, i64, Vec<ExtEasyRec>, u64, u64);
+    let pass2_results: Vec<Pass2Out> = (0..num_bands)
+        .into_par_iter()
+        .filter(|&t| is_heavy(t) && !band_sweeps[t].10.is_empty())
+        .map(|t| {
+            let band_lo = band_bounds[t];
+            let band_fold_floor: i64 =
+                initial_p2_offset.max(p2_init_lb_per_band[t]);
+            let deferred = &band_sweeps[t].10;
+
+            let (fp, fc, stored, ne, ns) = (far_easy_start..n_easy)
+                .into_par_iter()
+                .map(|ei| {
+                    let t_ei = Instant::now();
+                    let (mut pl_idx, mut next_n) = init_easy(ei, band_lo);
+                    if pl_idx >= a {
+                        return (0i128, 0i64,
+                                Vec::<ExtEasyRec>::new(), 0u64, 0u64);
+                    }
+                    let bi = n_hard + ei;
+                    let b  = bi + c + 1;
+                    let pb = primes[b - 1];
+                    let mut local_fp: i128 = 0;
+                    let mut local_fc: i64  = 0;
+                    let mut local_st: Vec<ExtEasyRec> = Vec::new();
+                    let mut local_ne: u64 = 0;
+
+                    for seg in deferred.iter() {
+                        if pl_idx >= a { break; }
+                        let lo_seg = seg.lo;
+                        let hi_seg = lo_seg + W30_SEG as u64;
+                        if next_n >= hi_seg { continue; }
+                        loop {
+                            if pl_idx >= a { break; }
+                            let n = next_n;
+                            if n >= hi_seg { break; }
+                            if n >= lo_seg {
+                                let raw = count_primes_in_segment(
+                                    &seg.bits, &seg.p2_prefix, n, lo_seg);
+                                let seed_in_query: i32 = if lo_seg < y {
+                                    let j2 = primes.partition_point(|&p| p <= n);
+                                    (j2 - seg.seed_below_lo) as i32
+                                } else { 0 };
+                                let v = seg.local_p2_offset
+                                    + raw as i64
+                                    - seg.adj_lo as i64
+                                    + seed_in_query as i64;
+                                let b_m1 = (b as i64) - 1;
+                                if v >= b_m1 - band_fold_floor {
+                                    local_fp += (v - (b_m1 - 1)) as i128;
+                                    local_fc += 1;
+                                    local_ne += 1;
+                                } else {
+                                    local_st.push(ExtEasyRec {
+                                        b_minus_2: (b as i32) - 2,
+                                        raw,
+                                        seed_in_query,
+                                        adj_lo: seg.adj_lo,
+                                        local_p2: seg.local_p2_offset,
+                                    });
+                                }
+                            }
+                            if pl_idx <= b {
+                                pl_idx = a;
+                                break;
+                            }
+                            pl_idx -= 1;
+                            next_n =
+                                (x / (pb as u128 * primes[pl_idx] as u128)) as u64;
+                        }
+                    }
+                    let ns = t_ei.elapsed().as_nanos() as u64;
+                    (local_fp, local_fc, local_st, local_ne, ns)
+                })
+                .reduce(
+                    || (0i128, 0i64, Vec::<ExtEasyRec>::new(), 0u64, 0u64),
+                    |mut acc, b| {
+                        acc.0 += b.0;
+                        acc.1 += b.1;
+                        acc.2.extend(b.2);
+                        acc.3 += b.3;
+                        acc.4 += b.4;
+                        acc
+                    },
+                );
+            (t, fp, fc, stored, ne, ns)
+        })
+        .collect();
+    let _pass2_wall_ns = pass2_t.elapsed().as_nanos() as u64;
+
+    // Merge pass-2 outputs into the heavy bands' BandSweep slot + stats.
+    for (t, fp, fc, mut stored, ne, ns) in pass2_results {
+        band_sweeps[t].6 += fp;
+        band_sweeps[t].7 += fc;
+        band_sweeps[t].8.append(&mut stored);
+        band_sweeps[t].9.n_ext_emitted += ne;
+        band_sweeps[t].9.tail_ext_ns   += ns;
+    }
 
     // ── Sequential prefix scan for phi / P2 per band ─────────────────────────
     let mut phi_band_inits: Vec<Vec<i64>> = vec![vec![0i64; b_ext]; num_bands];

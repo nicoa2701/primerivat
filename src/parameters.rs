@@ -5,6 +5,7 @@ use std::sync::OnceLock;
 static ALPHA_OVERRIDE: OnceLock<f64> = OnceLock::new();
 static BAND_MULT_OVERRIDE: OnceLock<usize> = OnceLock::new();
 static B_EXT_MULT_OVERRIDE: OnceLock<f64> = OnceLock::new();
+static NO_DEFERRED_TAIL_EXT: OnceLock<bool> = OnceLock::new();
 
 /// Pins the process-wide alpha value, bypassing hardware-adaptive selection.
 /// Only the first call takes effect; returns `Err` if already set.
@@ -54,6 +55,25 @@ pub fn b_ext_mult() -> f64 {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(1.0)
+}
+
+/// Disables the 2-pass deferred-tail-ext path in `s2_hard_sieve_par`,
+/// reverting to the single-pass behaviour. Used by `--no-deferred-tail-ext`
+/// and `RIVAT3_NO_DEFERRED_TAIL_EXT=1` for A/B benchmarking.
+pub fn set_no_deferred_tail_ext_override(disable: bool) -> Result<(), bool> {
+    NO_DEFERRED_TAIL_EXT.set(disable)
+}
+
+/// Returns true when the deferred-tail-ext path should be skipped (i.e. fall
+/// back to single-pass). Defaults to false (= deferred path enabled).
+pub fn no_deferred_tail_ext() -> bool {
+    if let Some(&b) = NO_DEFERRED_TAIL_EXT.get() {
+        return b;
+    }
+    std::env::var("RIVAT3_NO_DEFERRED_TAIL_EXT")
+        .ok()
+        .map(|s| !s.is_empty() && s != "0" && s.to_lowercase() != "false")
+        .unwrap_or(false)
 }
 
 /// Hardware-adaptive alpha selector for the DR algorithm.
