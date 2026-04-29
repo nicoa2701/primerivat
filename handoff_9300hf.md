@@ -3,8 +3,131 @@
 Pendant à `handoff_13450hx.md`. Note pour la **prochaine session dédiée**
 sur le **i5-9300HF** (4c/8t, 32 KB L1d, 256 KB L2, 8 MB L3, AVX2 only —
 pas d'AVX-512). Écrite le 2026-04-26, mise à jour en fin de session
-**Phase 1 + 2A** Kim-style cross-off déroulé wirées + **Phase 3** explorée
-puis revertée pour cause de régression sur le bulk.
+**2026-04-29** où 4 pistes ont été explorées (toutes fermées) + 3 commits
+shipped (per-band diagnostic, b_ext_mult override debug-knob, README
+refresh).
+
+**Pour reprendre directement sur le 2-pass S2_hard restructure** (la
+seule piste perf significative restante) → voir [`2pass_design.md`](2pass_design.md).
+
+---
+
+## État au 2026-04-29 (12 commits cumulés, dernière révision `a1cf99a`)
+
+```
+a1cf99a docs: refresh README perf table + new flags + cascade summary
+fe5a03f parameters: add b_ext_mult override (Piste D, Step D.1)
+75c054c profile: per-band breakdown in HardProfile + --dr-profile output
+ef14e63 tooling: add .gitattributes — enforce LF for *.ps1/*.sh, CRLF for *.bat
+d7e8531 tooling: add run.bat / run.ps1 — generic build-and-run helper
+2cf54f6 docs: handoff 9300HF post-Phase-3-explored-and-reverted
+f43d1b5 segment: Phase 3 explored — cross_off_pd_from_state_unrolled (not wired)
+a8aa681 docs: refresh 9300HF handoff for post-Phase-1+2A state
+e2528cf segment: Kim-style 8-way unrolled cross_off_count for bi_main (Phase 2A)
+66ce0b1 segment: Kim-style 8-way unrolled cross-off for rest_plain_xoff (Phase 1)
+d7ecaa4 docs: refresh 9300HF handoff for post-7bb4099 state
+…
+```
+
+**Cool baseline 9300HF (post-`a1cf99a`)** :
+
+| x | wall | régime | Δ vs `9e9162a` |
+|---|---:|---|---:|
+| 1e15 | **1.90 s** | α=1 | −65 % |
+| 1e17 | **46.0 s** | α=2 | −71 % |
+| 1e18 | (~488 s estimated) | α=2 | −61 % (post-cascade pre-Phase-1+2A; à re-bench) |
+
+### Pistes explorées cette session (toutes fermées)
+
+1. **Multi-template AND pre-sieve C=8** (`fill_presieved_to_19`,
+   `phi_small_a` étendu c≤8, `C: usize = 8`) : tests passent, π(10^k)
+   exact, **mais wall 1e15 cool 3.395 s vs 1.958 s baseline = +73 %
+   régression**. Causes : `fill_presieved_to_19` ×20 plus lent que
+   `fill_presieved_7_11` (5 µs vs 250 ns/fill, AND tile-by-tile byte-
+   par-byte sur 17 476 B), `tail advance` +177 % (advance_wheel_primes
+   maintenu sur tiny_state inutilisé). Reverted (jamais commité).
+   **Voie multi-template AND définitivement invalidée pour notre
+   architecture** — Kim achieve 5-10 % avec un `phi_tiny` O(1) qu'on
+   n'a pas, pas accessible sans refactor majeur.
+
+2. **Phi-recursive viability bench** (mode `--phi-bench` standalone,
+   `s1_ordinary_recursive` + `s1_ordinary_recursive_quotient`) :
+   confirme que **phi-recursive est unviable pour c > 8**. À x=1e15,
+   c=20 → S1 prend 9 s vs 9 ms brute-force c=5 (5× le wall total).
+   `phi_quotient_aware` strictement identique à `phi` plain (memo size
+   et timing). **Hard ceiling à c=8** comme chez Kim. Reverted.
+
+3. **Per-band diagnostic** (`HardProfile.per_band: Vec<BandProfile>`,
+   print top-10 + imbalance ratio sous `--dr-profile`) : commité
+   `75c054c`, no functional impact, populated unconditionally.
+
+4. **Piste C — sub-task Rayon dans `tail_ext_emit`** : nested
+   `par_iter_mut` sur la boucle ei avec reduce-based accumulation +
+   threshold n_extra ≥ 32. **+41 % wall à 1e17 α=2** (tail_ext CPU
+   93 → 290 s). Cause : outer 128-band par_iter sature déjà le pool
+   8-thread, nested spawns trouvent zéro thread idle, pure overhead
+   de scheduling. Reverted (jamais commité).
+
+5. **Oversubscribe `-b 32`** : confirme le 2026-04-26 "-b 16 plateau".
+   À 1e17 α=2 : 53 s vs 46 s = +10 % wall. Doubler num_bands ne split
+   que les bands déjà rapides à haut n ; bands 0+1 stay incompressible
+   à 1 W30_SEG = 524 280 entiers chacun.
+
+6. **Piste D — `b_ext_mult` override** (Piste D, commit `fe5a03f`) :
+   `parameters::b_ext_mult()`, CLI `-B <K>`, env `RIVAT3_B_EXT_MULT`,
+   restricted K ∈ [1.0, 10.0] (K<1 corrupts π via leaf-B violation,
+   verified empirically). Cool benches K ∈ {1.0, 1.5, 2.0} sur 1e15
+   α=1 et 1e17 α=2 : **K=1.0 optimal sur les deux régimes**. À K=1.5,
+   CPU baisse (-1.9 % à 1e15, -3 % à 1e17) mais wall reste ≥ baseline
+   parce que Rayon load balance dégrade. À K=2.0 : +32 % wall à 1e17
+   (catastrophique). Override conservé comme outil de debug.
+
+### Conclusion structurelle 2026-04-29
+
+**Le single-pass S2_hard est à un optimum local solide**. Les 4 pistes
+testées cette session sont fermées. Les **gains futurs nécessitent un
+refactor structurel** :
+
+- **2-pass S2_hard restructure** : seule piste perf significative
+  restante. Détail dans [`2pass_design.md`](2pass_design.md). Effort
+  ~300 LOC + analyse RAM préalable. Gain plausible jusqu'à -25 % wall
+  à 1e17 α=2 uniquement (zero à α=1 où l'efficacité Rayon est déjà
+  92 %).
+- **`phi_tiny` O(1) Kim-style** : refactor MAJEUR (~600 LOC, repenser
+  S1, table de taille `pp = ∏primes[1..a]` jusqu'à a=8). Gain estimé
+  5-10 % wall (la fraction du gap vs primecount qui vient du pre-sieve
+  multi-template). Pas accessible sans aussi atteindre ce phi_tiny.
+
+### Profile cool 1e17 α=2 actuel (post-`a1cf99a`, baseline 46.0 s)
+
+CPU 263 s / wall 47.1 s = 5.65× sur 8 threads = **70.6 % efficient**.
+
+| poste | CPU % | s | concentré sur |
+|---|---:|---:|---|
+| **tail_ext_emit** | **35.2 %** | 93.5 | bands 0+1 (50 % du tail_ext) |
+| rest_bulk_xoff | 24.0 % | 63.7 | bands 120-127 (high n) |
+| bi_main_xoff | 16.7 % | 44.3 | distribué |
+| rest_plain_xoff | 12.6 % | 33.4 | distribué |
+| tail_advance | 6.5 % | 17.3 | distribué |
+| bi_main_leaf | 4.6 % | 12.2 | distribué |
+
+**Imbalance ratio 13.2×** (band 1 = 26 s vs mean 2 s). C'est le
+plafond Rayon — bands 0+1 prennent ~17 % du CPU total à eux deux.
+
+### Profile cool 1e15 α=1 actuel (post-`a1cf99a`, baseline 1.90 s)
+
+CPU 11.3 s / wall 1.9 s = 5.94× sur 8 threads = **74 % efficient**.
+
+| poste | CPU % | ms |
+|---|---:|---:|
+| rest_bulk_xoff | 30.7 % | 3 455 |
+| bi_main_xoff | 24.7 % | 2 782 |
+| tail_ext_emit | 14.6 % | 1 645 |
+| rest_plain_xoff | 12.6 % | 1 416 |
+| tail_advance | 12.7 % | 1 432 |
+
+À α=1 le profil est plus uniforme (rest_bulk dominant, distribué entre
+bands à haut n). Le 2-pass aurait peu d'impact ici.
 
 ---
 
