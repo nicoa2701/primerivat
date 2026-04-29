@@ -4,6 +4,7 @@ use std::sync::OnceLock;
 
 static ALPHA_OVERRIDE: OnceLock<f64> = OnceLock::new();
 static BAND_MULT_OVERRIDE: OnceLock<usize> = OnceLock::new();
+static B_EXT_MULT_OVERRIDE: OnceLock<f64> = OnceLock::new();
 
 /// Pins the process-wide alpha value, bypassing hardware-adaptive selection.
 /// Only the first call takes effect; returns `Err` if already set.
@@ -28,6 +29,31 @@ pub fn band_mult() -> usize {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(16)
+}
+
+/// Overrides the multiplier applied to `x^{1/4}` when computing the
+/// `b_ext` bulk frontier in `s2_hard_sieve_par`. See [`b_ext_mult`].
+pub fn set_b_ext_mult_override(mult: f64) -> Result<(), f64> {
+    B_EXT_MULT_OVERRIDE.set(mult)
+}
+
+/// Multiplier applied to `x^{1/4}` when computing the `b_ext` bulk frontier
+/// in `s2_hard_sieve_par`. Defaults to 1.0 (= the standard Deléglise-Rivat
+/// frontier). Values >1 push more primes into the phi_vec path
+/// (bi_main + rest_plain GROW); values <1 push more primes into the bulk +
+/// pi-formula path (rest_bulk + tail_ext_emit GROW).
+///
+/// Used by Piste D experiments to find the optimal frontier per regime.
+/// Overridable via [`set_b_ext_mult_override`] or the `RIVAT3_B_EXT_MULT`
+/// env var.
+pub fn b_ext_mult() -> f64 {
+    if let Some(&m) = B_EXT_MULT_OVERRIDE.get() {
+        return m;
+    }
+    std::env::var("RIVAT3_B_EXT_MULT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1.0)
 }
 
 /// Hardware-adaptive alpha selector for the DR algorithm.

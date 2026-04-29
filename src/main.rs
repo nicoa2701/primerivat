@@ -104,6 +104,18 @@ fn parse_band_mult(s: &str) -> Result<usize, String> {
     }
 }
 
+fn parse_b_ext_mult(s: &str) -> Result<f64, String> {
+    match s.parse::<f64>() {
+        Ok(v) if v.is_finite() && (1.0..=10.0).contains(&v) => Ok(v),
+        Ok(_) => Err(
+            "b-ext-mult must be in [1.0, 10.0]; K<1 below x^(1/4) breaks the leaf-B \
+             pi-formula condition and corrupts π(x)"
+                .to_string(),
+        ),
+        Err(_) => Err(format!("'{}' is not a valid b-ext-mult value", s)),
+    }
+}
+
 const ALPHA_INTERMEDIATE_MAX_X: u128 = 1_000_000_000_000_000; // 1e15
 
 fn alpha_is_canonical(alpha: f64) -> bool {
@@ -161,6 +173,7 @@ struct Cli {
     experimental_mode: ExperimentalMode,
     alpha_override: Option<f64>,
     band_mult_override: Option<usize>,
+    b_ext_mult_override: Option<f64>,
 }
 
 enum Mode {
@@ -184,6 +197,7 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
     let experimental_mode = ExperimentalMode::None;
     let mut alpha_override: Option<f64> = None;
     let mut band_mult_override: Option<usize> = None;
+    let mut b_ext_mult_override: Option<f64> = None;
     let mut _used_t_flag = false;
     let mut _used_non_t_option = false;
     let mut mode: Option<Mode> = None;
@@ -220,6 +234,15 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
                     .get(i + 1)
                     .ok_or_else(|| format!("missing value after {}", flag))?;
                 band_mult_override = Some(parse_band_mult(value)?);
+                _used_non_t_option = true;
+                i += 2;
+            }
+            "-B" | "--b-ext-mult" => {
+                let flag = args[i].clone();
+                let value = args
+                    .get(i + 1)
+                    .ok_or_else(|| format!("missing value after {}", flag))?;
+                b_ext_mult_override = Some(parse_b_ext_mult(value)?);
                 _used_non_t_option = true;
                 i += 2;
             }
@@ -299,6 +322,7 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
         experimental_mode,
         alpha_override,
         band_mult_override,
+        b_ext_mult_override,
     })
 }
 
@@ -540,6 +564,10 @@ fn print_usage(program: &str) {
     eprintln!("  -b <N>, --band-mult <N>");
     eprintln!("                     Bands per Rayon thread in the DR engine (1..=1024).");
     eprintln!("                     Default 16; higher = finer Rayon rebalancing.");
+    eprintln!("  -B <K>, --b-ext-mult <K>");
+    eprintln!("                     Multiplier on x^(1/4) for the b_ext bulk frontier (Piste D).");
+    eprintln!("                     Default 1.0; range [0.1, 10.0]. K>1 grows phi_vec path,");
+    eprintln!("                     K<1 grows pi-formula / bulk path.");
     eprintln!();
     eprintln!("Examples:");
     eprintln!("  {} 1e13", program);
@@ -589,6 +617,10 @@ fn main() {
 
     if let Some(mult) = cli.band_mult_override {
         let _ = rivat3::parameters::set_band_mult_override(mult);
+    }
+
+    if let Some(mult) = cli.b_ext_mult_override {
+        let _ = rivat3::parameters::set_b_ext_mult_override(mult);
     }
 
     match cli.mode {

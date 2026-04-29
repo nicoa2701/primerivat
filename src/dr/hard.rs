@@ -245,10 +245,21 @@ pub fn s2_hard_sieve_par(
     // This lets us skip phi_vec maintenance for the bulk of the primes and use
     // the final prime-sieve (same as P2) for the direct π(n) lookup instead.
     let b_ext = {
-        let x4: u64 = (x as f64).sqrt().sqrt() as u64 + 2; // x^{1/4} + safety margin
+        // Piste D: `b_ext_mult` (≥ 1.0) lets experiments push the frontier
+        // ABOVE the canonical x^{1/4}. We never let it go below the natural
+        // boundary: pi-formula is only valid for `pb > x^{1/4}` (guarantees
+        // n < pb², the leaf-B condition); reducing b_ext under that threshold
+        // corrupts π. The natural `partition_point(p ≤ x^{1/4})` is therefore
+        // the algorithmic minimum — `b_ext_mult < 1.0` is silently lifted.
+        let x4_base = (x as f64).sqrt().sqrt();
+        let x4_natural: u64 = x4_base as u64 + 2;
+        let mult = crate::parameters::b_ext_mult().max(1.0);
+        let x4: u64 = (x4_base * mult) as u64 + 2;
+        let natural_partition = primes[c..a].partition_point(|&p| p <= x4_natural);
         primes[c..a].partition_point(|&p| p <= x4)
-            .max(n_hard)   // must cover all hard leaves
-            .min(n_all)    // clamp to valid range
+            .max(natural_partition) // never below the canonical DR boundary
+            .max(n_hard)            // must cover all hard leaves
+            .min(n_all)             // clamp to valid range
     };
     // n_ext_easy: easy bi values below b_ext that still use phi_vec
     let n_ext_easy = b_ext.saturating_sub(n_hard);
