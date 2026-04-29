@@ -5,14 +5,56 @@ sur le **i5-9300HF** (4c/8t, 32 KB L1d, 256 KB L2, 8 MB L3, AVX2 only —
 pas d'AVX-512). Écrite le 2026-04-26, mise à jour en fin de session
 **2026-04-29** où 4 pistes ont été explorées (toutes fermées) + 3 commits
 shipped (per-band diagnostic, b_ext_mult override debug-knob, README
-refresh).
+refresh). **Mise à jour soir 2026-04-29** : Étape A du 2-pass shipped
+(`ddc1786`), 1e17 α=2 cool 46.5 → 38.9 s = **−16.3 %**.
 
-**Pour reprendre directement sur le 2-pass S2_hard restructure** (la
-seule piste perf significative restante) → voir [`2pass_design.md`](2pass_design.md).
+**Pour reprendre directement sur les pistes perf restantes** → voir
+[`2pass_design.md`](2pass_design.md). Deux pistes auto-portantes y sont
+détaillées :
+
+- **§8 Piste prioritaire** — band 127 / overlap pass 1+2 (gain projeté
+  ~−15 à −50 % wall vs 38.9 s, selon l'option retenue). Bottleneck
+  désormais sur le single-thread des bands 120-127, pas sur les heavies.
+- **§9 Piste secondaire** — Étape C heuristique généralisée (refactor
+  robustesse, ROI direct ~0-3 %).
 
 ---
 
-## État au 2026-04-29 (12 commits cumulés, dernière révision `a1cf99a`)
+## État au 2026-04-29 soir — post-Étape A 2-pass (commit `ddc1786`)
+
+```
+ddc1786 hard: 2-pass deferred-tail-ext POC (Étape A from 2pass_design.md)
+7c4856a docs: handoff 9300HF post-2026-04-29 + 2pass_design.md
+a1cf99a docs: refresh README perf table + new flags + cascade summary
+fe5a03f parameters: add b_ext_mult override (Piste D, Step D.1)
+75c054c profile: per-band breakdown in HardProfile + --dr-profile output
+…
+```
+
+**Nouvelle baseline cool 9300HF post-`ddc1786`** :
+
+| x | wall | régime | Δ vs `a1cf99a` |
+|---|---:|---|---:|
+| 1e15 | **1.875 s** | α=1 | neutre (path bypassé via `is_heavy=false`) |
+| 1e15 | 1.632 s warm | α=2 | -50 % vs --no-deferred (3.249 s warm) |
+| 1e17 | **38.9 s** | α=2 | **−16.3 %** vs 46.5 s |
+
+Profile cool 1e17 α=2 (CPU 256 s / wall 38.9 s = 6.58× sur 8 threads =
+**82 % efficient**, vs 71 % avant) :
+- Bands 0+1 sont déchargées via pass 2 nested par_iter (~5 s wall heavy).
+- **Nouveau bottleneck single-thread = band 127** : 14.4 s wall dominé
+  par `rest_bulk_xoff` (6.6 s) + `tail_ext mid` (1.4 s) + `bi_main` (~3 s).
+  Bands 120-127 prennent toutes 11-14 s wall sur leur thread Rayon.
+- Pass 1 wall ~16 s (cap par band 127) + pass 2 wall ~22 s + resolve = 38.9 s.
+
+**Pour la prochaine session, prioritiser §8 du 2pass_design.md** :
+overlap pass 1 / pass 2 via `rayon::join` ou re-architecture en
+producer-consumer, gain projeté ~−40 à −50 % wall vs post-Étape-A si
+l'option 8.A passe le bench. Critère pass : ≤ 35 s à 1e17 α=2 cool.
+
+---
+
+## État au 2026-04-29 matin (12 commits cumulés, dernière révision `a1cf99a`)
 
 ```
 a1cf99a docs: refresh README perf table + new flags + cascade summary
@@ -399,32 +441,52 @@ target/release/primerivat -b 16 ...                   # band mult override
 
 ## Follow-ups ouverts pour la prochaine session (par ordre de priorité)
 
-1. **Multi-template AND pre-sieve** (style Kim `Sieve_pre_sieve.hpp`) —
-   chaîne de 7 petits templates AND'd dans le sieve, chacun ≤ 4757 B
-   pour rester sous L1d (32 KB) avec le sieve courant (17 480 B).
-   Couvre primes 13, puis paires {17,19}, {23,29}, …, {67,71}. Gain
-   estimé **5–10 % wall**, ~300 LOC. Garde-fou : tester que
-   `template_bytes + sieve_bytes ≤ 32 KB` strictement (la tentative
-   C=7 mono-template = 17017 B avait régressé +5.5 % par cache miss).
+> **Note 2026-04-29 soir** : la priorité a changé après le shipping de
+> l'Étape A 2-pass (`ddc1786`, −16.3 % à 1e17 α=2). Le nouveau
+> bottleneck est le single-thread des bands 120-127 (band 127 = 14.4 s
+> wall dominé par `rest_bulk_xoff`). Voir [`2pass_design.md`](2pass_design.md) §8.
 
-2. **Phase 3 v2 avec seuil conditionnel** (cf section ci-dessus). Effort
-   faible (~30 LOC : `partition_point` + 2 boucles dans hard.rs). Gain
-   estimé modeste (1–2 % wall) car la moitié des primes bulk reste
-   rolled. Tenter seulement si la Mesure WSL post-2A confirme qu'on est
-   loin de Kim.
+1. **Étape A 2-pass v2 — overlap pass 1+2** ([`2pass_design.md`](2pass_design.md) §8.A,
+   priorité 1). Démarrer le pass 2 nested sur les heavy bands AVANT que
+   pass 1 finisse les light bands (= cap par band 127 = 14 s actuellement).
+   Pattern Rayon `join` ou producer-consumer avec channel. **Gain projeté
+   ~−40 à −50 % wall vs 38.9 s** (cible ≤ 25 s à 1e17 α=2). Effort 80-150 LOC.
+   Garde-fous : tests bit-exact + neutralité α=1 + stabilité 13450HX.
 
-3. **Re-bench WSL post-`a8aa681`** pour figer le facteur Kim définitif
-   (Win→WSL ~6-7 % wall). Estimation actuelle 4.5× / 6.05× à confirmer.
+2. **Étape A 2-pass v2b — paralléliser band 127 rest_bulk_xoff intra-band**
+   ([`2pass_design.md`](2pass_design.md) §8.B, priorité 2 si §8.A insuffisant).
+   Sortir la boucle bulk de la band closure et la par_iter sur les chunks
+   de primes. Gain projeté ~−15 % wall, plus invasif que §8.A.
 
-4. **Piste D** — étendre le frontier `b_ext` vers `b_limit` pour basculer
-   plus de primes en chemin bulk (avec son scaling de coût). Effort
-   élevé, gain plausible 5–10 %.
+3. **Étape C — heuristique généralisée** ([`2pass_design.md`](2pass_design.md) §9,
+   priorité 3, robustesse). Remplacer le hardcode `t < 2` par
+   `n_ext_emit_predicted[t] > k × mean`. ROI direct ~0-3 % mais évite
+   la dette de hard-coding pour x très grand ou autre topologie CPU.
 
-5. **Piste C** — sub-task Rayon dans `bi_main` pour récupérer les ~10
-   points de % d'efficacité Rayon perdus à α=2 (78 → 71 % post-2A).
+4. **Multi-template AND pre-sieve** (style Kim `Sieve_pre_sieve.hpp`) —
+   chaîne de 7 petits templates AND'd, gain estimé 5–10 % wall, ~300 LOC.
+   Garde-fou : `template_bytes + sieve_bytes ≤ 32 KB L1d` strictement
+   (C=7 mono-template = 17017 B avait régressé +5.5 % par cache miss).
+   **Ne déclencher qu'après §1-§3** : interagit avec le pass 1 qui doit
+   être dans son nouvel équilibre avant.
 
-6. **README refresh** : la perf table publiée est figée à `9e9162a`
-   (avant cascade). Update au state cool actuel.
+5. **Phase 3 v2 avec seuil conditionnel** (cf section dédiée du handoff).
+   Effort faible (~30 LOC : `partition_point` + 2 boucles dans hard.rs).
+   Gain estimé modeste (1–2 % wall) car la moitié des primes bulk reste
+   rolled. À évaluer après §1 (l'amélioration peut absorber rest_bulk
+   du chemin critique).
+
+6. **Re-bench WSL post-`ddc1786`** pour figer le facteur Kim définitif
+   (Win→WSL ~6-7 % wall). Estimation actuelle 4.5× / 6.05× — Étape A
+   nous rapproche : 38.9 s × 0.93 (Win→WSL) ≈ 36 s → ratio ~4.7× vs
+   primecount 7.7 s.
+
+7. **Piste D** — étendre le frontier `b_ext` vers `b_limit`. Effort
+   élevé, gain plausible 5–10 %, mais **interaction inconnue avec le
+   2-pass** : à reposer après §1.
+
+8. **README refresh** : la perf table publiée est figée à `9e9162a`
+   (avant cascade). Update au state cool actuel (38.9 s à 1e17 α=2).
 
 ---
 
