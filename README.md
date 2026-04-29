@@ -7,7 +7,7 @@ based on the **Deléglise–Rivat** algorithm.
 
 The current engine (`prime_pi_dr_meissel_v4`) is active by default and
 computes π(x) exactly up to at least `x = 1e18` on commodity hardware
-(verified cross-CPU at commit `9e9162a`).
+(verified cross-CPU through commit `fe5a03f`).
 
 ## Quick start
 
@@ -18,7 +18,7 @@ cargo run --release -- 1e15        # π(1e15) = 29 844 570 422 669
 ```
 
 The binary prints a startup tag with the short git hash, detected L3, and
-the selected α (e.g. `[primerivat 9e9162a | L3=8Mo α=2]`), making it easy
+the selected α (e.g. `[primerivat fe5a03f | L3=8Mo α=2]`), making it easy
 to compare multiple builds side by side.
 
 ## Measured performance
@@ -31,23 +31,36 @@ Release build, multi-threaded, adaptive α. Two reference machines:
 | x | i5-9300H | i5-13450HX | π(x) |
 |---|---:|---:|---|
 | `1e11` | 0.015 s | 0.013 s | 4 118 054 813 |
-| `1e12` | 0.055 s | 0.034 s | 37 607 912 018 |
-| `1e13` | 0.237 s | 0.104 s | 346 065 536 839 |
-| `1e14` | 1.077 s | 0.432 s | 3 204 941 750 802 |
-| `1e15` | 5.507 s | 1.831 s | 29 844 570 422 669 |
-| `1e16` | 29.7 s  | 8.63 s  | 279 238 341 033 925 |
-| `1e17` | 160 s (α=2) | 44.8 s (α=1) | 2 623 557 157 654 233 |
-| `1e18` | 1266 s (α=2) | 301 s (α=1) | 24 739 954 287 740 860 |
+| `1e12` | 0.030 s | 0.034 s | 37 607 912 018 |
+| `1e13` | 0.139 s | 0.104 s | 346 065 536 839 |
+| `1e14` | 0.495 s | 0.432 s | 3 204 941 750 802 |
+| `1e15` | 1.90 s | 1.83 s | 29 844 570 422 669 |
+| `1e16` | 10.6 s | 8.63 s | 279 238 341 033 925 |
+| `1e17` | 46.0 s (α=2) | 44.8 s (α=1) | 2 623 557 157 654 233 |
+| `1e18` | 488 s (α=2) | 301 s (α=1) | 24 739 954 287 740 860 |
 
-Both columns are cold single-run measurements at commit `9e9162a`, each
-machine running the optimised build for the first time after a cold start
-(i5-9300H thermal-throttles noticeably under sustained load, so cold runs
-are representative of a single interactive invocation).
+i5-9300H column measured at commit `fe5a03f` (post-Phase-1+2A Kim-style
+unrolled cross-off, post-popcount-LUT-240). 1e15 / 1e17 are cool single-run
+times; smaller `x` values are taken from a single batch invocation
+(near-zero drift). 1e18 is the post-cascade single-run snapshot from an
+earlier session (pre-Phase-1+2A); the actual Phase-1+2A figure is expected
+to be ~10–15 % lower but has not been re-measured yet. The 9300H thermal-
+throttles after ~10 s sustained load, so a typical interactive invocation
+matches the cool single-run column.
 
-Cumulative speedup vs. the pre-session baseline: **~−24 % of runtime at
-1e13–1e17 on i5-9300H**, ~−14 % at 1e18 on i5-13450HX. Gains come from
-three combined changes: fused `phi_vec` init, monotonic cursor replacing
-`fill_prefix_counts`, and the `{7, 11}` pre-sieve tile.
+i5-13450HX column unchanged from commit `9e9162a` measurements: the
+S2_hard cascade (Pistes 1+3 gated on α=2 clamps) is **strictly neutral**
+at α=1, which is the only regime the 13450HX uses on its full range
+(measured 139 s vs 140 s at 1e18 pre/post cascade).
+
+Cumulative speedup vs. the pre-session baseline at commit `9e9162a` on
+i5-9300H: **~−65 % at 1e15** (5.51 s → 1.90 s), **~−71 % at 1e17 α=2**
+(160 s → 46 s), **~−61 % at 1e18 α=2** (1266 s → 488 s). The cumulative
+gains come from a 13-commit S2_hard refactor cascade (single-pass
+deferred-leaf design, fold accumulators, log-scale band layout for α=2,
+clamp-leaf bulk pre-count, `{7, 11}` pre-sieve tile, popcount via 240-bit
+LUT, Kim-style 8-way unrolled cross-off in `bi_main_xoff` and
+`rest_plain_xoff`).
 
 ## Algorithm
 
@@ -162,8 +175,15 @@ cargo run --release -- 1e11 1e12 1e13 1e14
 cargo run --release -- 1e17 -a 2
 cargo run --release -- 1e13 --alpha 1
 
+# Tune Rayon banding (advanced; -b 16 is the empirical plateau on 9300H)
+cargo run --release -- 1e17 -a 2 -b 16
+
+# Lift the b_ext bulk frontier (Piste D debug knob; K=1.0 is optimal,
+# K<1.0 is rejected because the leaf-B condition would break)
+cargo run --release -- 1e17 -a 2 -B 1.5
+
 # Profiling
-cargo run --release -- --dr-profile 1e13  # DR v4 step timings
+cargo run --release -- --dr-profile 1e13  # DR v4 step timings + per-band breakdown
 cargo run --release -- --lucy-profile 1e13
 
 # Decade sweep up to x_max (default 1e12)
@@ -199,13 +219,23 @@ Reference values checked:
    into the sieve at each segment start, replacing the ones-fill + two
    wheel-30 cross-off loops. Sequential byte-copy vectorises well, avoiding
    the scattered bit writes of the generic path.
-4. **Bucket sieve** — in the bulk cross-off for primes `≥ x¹ᐟ⁴`, primes with
+4. **Kim-style 8-way unrolled cross-off** — `cross_off_pd_unrolled` (used
+   by `rest_plain_xoff`) and `cross_off_count_pd_unrolled` (used by
+   `bi_main_xoff`) dispatch on the prime's residue group `g = p % 30 ∈ {1,
+   7, 11, 13, 17, 19, 23, 29}` and execute 8 specialised inner loops with
+   bit positions baked as immediates (`andb m8, imm8`). 2.0× to 3.4×
+   speedup over the rolled variant on those phases.
+5. **Popcount via 240-bit LUT** — `count_primes_upto_int{,_m}` rewires the
+   inner popcount step to use a 1920-byte `W30_MASK_LEQ_240[u64]` table
+   (240 = 8 wheel residues × 30, exactly one full u64 word), reducing each
+   call to two div/mod + one LUT load. Universal across α regimes.
+6. **Bucket sieve** — in the bulk cross-off for primes `≥ x¹ᐟ⁴`, primes with
    `p² > hi` are skipped: any composite in `[lo, hi)` has a factor `≤ √hi`.
-5. **Seed correction** — for `lo < y`, seed primes in `[lo, hi)` are crossed
+7. **Seed correction** — for `lo < y`, seed primes in `[lo, hi)` are crossed
    off as multiples of themselves and re-added via `seed_in_seg` /
    `seed_in_query`.
-6. **`ext_easy` clamp** — `φ(n, b−1)` is clamped to `≥ 1` when `n < p_{b−1}`.
-7. **Small-x guard** — `if a ≤ C { return baseline::prime_pi(x) }`.
+8. **`ext_easy` clamp** — `φ(n, b−1)` is clamped to `≥ 1` when `n < p_{b−1}`.
+9. **Small-x guard** — `if a ≤ C { return baseline::prime_pi(x) }`.
 
 ## Reference
 
