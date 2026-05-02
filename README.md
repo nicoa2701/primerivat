@@ -23,44 +23,55 @@ to compare multiple builds side by side.
 
 ## Measured performance
 
-Release build, multi-threaded, adaptive α. Two reference machines:
+Release build, multi-threaded, adaptive α. Three reference machines:
 
 - **i5-9300H** — 4C/8T, 8 MB L3, DDR4-2666 (Coffee Lake, 2019)
-- **i5-13450HX** — 6P+4E cores / 12T, 20 MB L3, DDR5 (Raptor Lake, 2023)
+- **i5-13450HX** — 6P+4E (10 phys / 16T), 20 MB L3, DDR5 (Raptor Lake, 2023)
+- **Ryzen 7 9700X** — 8C/16T, 32 MB L3, DDR5 (Zen 5, 2024)
 
-| x | i5-9300H | i5-13450HX | π(x) |
-|---|---:|---:|---|
-| `1e11` | 0.015 s | 0.013 s | 4 118 054 813 |
-| `1e12` | 0.030 s | 0.034 s | 37 607 912 018 |
-| `1e13` | 0.139 s | 0.104 s | 346 065 536 839 |
-| `1e14` | 0.495 s | 0.432 s | 3 204 941 750 802 |
-| `1e15` | 1.90 s | 1.83 s | 29 844 570 422 669 |
-| `1e16` | 10.6 s | 8.63 s | 279 238 341 033 925 |
-| `1e17` | 46.0 s (α=2) | 44.8 s (α=1) | 2 623 557 157 654 233 |
-| `1e18` | 488 s (α=2) | 301 s (α=1) | 24 739 954 287 740 860 |
+| x | i5-9300H | i5-13450HX | Ryzen 9700X | π(x) |
+|---|---:|---:|---:|---|
+| `1e11` | 9 ms | 9 ms | 4 ms | 4 118 054 813 |
+| `1e12` | 30 ms | 31 ms | 10 ms | 37 607 912 018 |
+| `1e13` | 117 ms | 56 ms | 42 ms | 346 065 536 839 |
+| `1e14` | 466 ms | 220 ms | 163 ms | 3 204 941 750 802 |
+| `1e15` | 1.85 s | 0.81 s | 0.62 s | 29 844 570 422 669 |
+| `1e16` | 8.74 s | 3.08 s | 2.29 s | 279 238 341 033 925 |
+| `1e17` | 42.1 s α=2 | 14.4 s α=1 | 10.6 s α=1 | 2 623 557 157 654 233 |
+| `3e17` | 135 s α=2 | 39.9 s α=1 | 20.3 s α=2 | 7 650 011 911 220 803 |
+| `1e18` | 313 s α=2 | 97.0 s α=1 | 49.2 s α=2 | 24 739 954 287 740 860 |
 
-i5-9300H column measured at commit `fe5a03f` (post-Phase-1+2A Kim-style
-unrolled cross-off, post-popcount-LUT-240). 1e15 / 1e17 are cool single-run
-times; smaller `x` values are taken from a single batch invocation
-(near-zero drift). 1e18 is the post-cascade single-run snapshot from an
-earlier session (pre-Phase-1+2A); the actual Phase-1+2A figure is expected
-to be ~10–15 % lower but has not been re-measured yet. The 9300H thermal-
-throttles after ~10 s sustained load, so a typical interactive invocation
-matches the cool single-run column.
+All columns measured at commit `8a6d89b` (post-2-tier α rule), batch
+single-trial sweep `1e11 1e12 … 1e18`. The 9300H thermal-throttles after
+~10 s sustained load, so 1e17 here (42.1 s, α=2) is mid-throttle; the
+post-Étape-A cool single-run snapshot at the same magnitude is 38.9 s.
+1e18 on 9300H (313 s α=2) is run separately as it takes ~5+ min — that
+result is both 36 % below the pre-Phase-1+2A snapshot of 488 s and 75 %
+below the pre-cascade `9e9162a` baseline of 1266 s.
 
-i5-13450HX column unchanged from commit `9e9162a` measurements: the
-S2_hard cascade (Pistes 1+3 gated on α=2 clamps) is **strictly neutral**
-at α=1, which is the only regime the 13450HX uses on its full range
-(measured 139 s vs 140 s at 1e18 pre/post cascade).
+The 9700X column shows the new α=2 regime kicking in from 3e17 onward
+(adaptive rule, see below): 20.3 s at 3e17 (vs ~26 s at α=1) and 49.2 s
+at 1e18 (vs ~72 s at α=1).
 
-Cumulative speedup vs. the pre-session baseline at commit `9e9162a` on
-i5-9300H: **~−65 % at 1e15** (5.51 s → 1.90 s), **~−71 % at 1e17 α=2**
-(160 s → 46 s), **~−61 % at 1e18 α=2** (1266 s → 488 s). The cumulative
-gains come from a 13-commit S2_hard refactor cascade (single-pass
-deferred-leaf design, fold accumulators, log-scale band layout for α=2,
-clamp-leaf bulk pre-count, `{7, 11}` pre-sieve tile, popcount via 240-bit
-LUT, Kim-style 8-way unrolled cross-off in `bi_main_xoff` and
-`rest_plain_xoff`).
+Cumulative speedup vs. the pre-cascade baseline at commit `9e9162a`
+across all three CPUs (the cascade gains are universal — Phase 1+2A,
+popcount LUT-240, single-pass merge, fold accumulators, band-split 16×,
+2-pass deferred-tail-ext for α=2 regime):
+
+| x | i5-9300H | i5-13450HX | Ryzen 9700X |
+|---|---:|---:|---:|
+| 1e15 | 5.51 → 1.85 s (**−66 %**) | — → 0.81 s | — → 0.62 s |
+| 1e17 α=2 | 160 → 42 s (**−74 %**) | — | — |
+| 1e17 α=1 | — | 44.8 → 14.4 s (**−68 %**) | — → 10.6 s |
+| 1e18 α=2 | 1266 → 313 s (**−75 %**) | — | — → 49.2 s |
+| 1e18 α=1 | — | 301 → 97 s (**−68 %**) | — |
+
+The cumulative gains come from the multi-commit S2_hard refactor cascade
+(single-pass deferred-leaf design, fold accumulators, log-scale band
+layout for α=2, clamp-leaf bulk pre-count, `{7, 11}` pre-sieve tile,
+popcount via 240-bit LUT, Kim-style 8-way unrolled cross-off in
+`bi_main_xoff` and `rest_plain_xoff`, 2-pass deferred-tail-ext, and the
+2-tier adaptive α rule).
 
 ## Algorithm
 
