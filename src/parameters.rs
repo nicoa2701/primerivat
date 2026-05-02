@@ -78,21 +78,35 @@ pub fn no_deferred_tail_ext() -> bool {
 
 /// Hardware-adaptive alpha selector for the DR algorithm.
 ///
-/// Returns 2.0 only when x is large enough AND the CPU has a small L3
-/// with few cores — otherwise α=1.0 wins (measured: α=2.0 regresses 35%
-/// on i5-13450HX at 1e17 but gains 12% on i5-9300H).
+/// Two CPU tiers benefit from α=2.0, with different x thresholds:
+/// - **9300H tier** (small L3, ≤ 8 physical cores): α=2 from x ≥ 3e16
+///   (measured +12 % gain at 1e17, +60 % at 1e18 on i5-9300H).
+/// - **9700X tier** (≥ 8 physical cores + pure SMT, i.e. logical = 2×phys):
+///   α=2 from x ≥ 3e17 (measured −24 % at 1e18, −27 % at 5e17 on Ryzen 7
+///   9700X). Below 3e17 α=1 still wins (+51 % at 1e17).
+///
+/// Hybrid asymmetric CPUs that satisfy neither tier (e.g. i5-13450HX with
+/// 6P+4E / 16 logical / 20 MB L3 — phys=10, logical=16, not pure 2×) keep
+/// α=1 throughout — α=2 was measured neutral-to-regressing on those.
 ///
 /// A process-wide override set via [`set_alpha_override`] takes precedence.
 pub fn choose_alpha(x: u128) -> f64 {
     if let Some(&alpha) = ALPHA_OVERRIDE.get() {
         return alpha;
     }
-    if x < 30_000_000_000_000_000u128 {
-        return 1.0;
-    }
     let l3_mb = cache_size::l3_cache_size().unwrap_or(8 << 20) >> 20;
-    let cores = num_cpus::get_physical();
-    if l3_mb < 16 && cores <= 8 { 2.0 } else { 1.0 }
+    let physical = num_cpus::get_physical();
+    let logical = num_cpus::get();
+
+    // 9300H tier: small L3, ≤ 8 physical → α=2 from 3e16.
+    if x >= 30_000_000_000_000_000u128 && l3_mb < 16 && physical <= 8 {
+        return 2.0;
+    }
+    // 9700X tier: ≥ 8 physical with pure SMT (logical == 2×physical) → α=2 from 3e17.
+    if x >= 300_000_000_000_000_000u128 && physical >= 8 && logical == physical * 2 {
+        return 2.0;
+    }
+    1.0
 }
 
 /// One-time detection snapshot for startup logging.

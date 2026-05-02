@@ -93,13 +93,22 @@ The `ext_easy` closed form `φ(n, b−1) = π(n) − (b−2)` is valid when
 
 ### Adaptive α
 
-`y = α·∛x` with α chosen per magnitude of `x` **and hardware**:
+`y = α·∛x` with α chosen per magnitude of `x` **and hardware**, in two
+hardware tiers:
 
-- `x < 3e16` → α = 1.0 (lower overhead for small `x`)
-- `x ≥ 3e16` **and L3 < 16 MB and ≤ 8 physical cores** → α = 2.0
-  (~41 % faster at `1e17` thanks to fewer sieve windows on cache-constrained CPUs)
-- `x ≥ 3e16` on larger CPUs (L3 ≥ 16 MB, e.g. desktop/HX parts) → α = 1.0
-  (the bigger L3 absorbs the extra sieve windows, so α = 1 is faster there)
+- **9300H tier** (L3 < 16 MB **and** ≤ 8 physical cores, e.g. cache-
+  constrained laptops): α = 2.0 from `x ≥ 3e16` (~41 % faster at `1e17`).
+- **9700X tier** (≥ 8 physical cores **and** pure SMT, i.e.
+  `logical == 2 × physical`, e.g. Ryzen 7 9700X 8C/16T or any Threadripper
+  with HT/SMT enabled): α = 2.0 from `x ≥ 3e17` (~24 % faster at `1e18`,
+  ~28 % faster at `5e17`).
+- All other CPUs (e.g. Intel hybrid P+E parts where `logical < 2 ×
+  physical`, or any `x` below the relevant threshold): α = 1.0.
+
+The two thresholds reflect that the SMT-symmetric desktop tier (16 logical
+threads, large L3) absorbs α=1's larger sieve windows up to ~1e17, after
+which α=2's algorithmic CPU savings (−42 % at 1e18) dominate the slightly
+worse Rayon balance.
 
 The auto-selection can be overridden from the CLI with `-a <α>` or
 `--alpha <α>`. Accepted range:
