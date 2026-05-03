@@ -1,4 +1,5 @@
 pub mod baseline;
+pub mod bucket_sieve;
 pub mod cpu_detect;
 pub mod dr;
 pub mod factor_table;
