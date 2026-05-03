@@ -5,6 +5,7 @@ pub mod factor_table;
 pub mod math;
 pub mod parameters;
 pub mod phi;
+pub mod prime_bitset;
 pub mod primes;
 pub mod segment;
 pub mod sieve;
