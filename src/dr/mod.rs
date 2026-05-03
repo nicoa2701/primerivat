@@ -34,7 +34,7 @@ pub fn uses_baseline_fallback(x: u128) -> bool {
 pub fn prime_pi_dr_meissel_v4(x: u128) -> u128 {
     use crate::math::{icbrt, isqrt};
     use crate::phi::s1_ordinary;
-    use crate::segment::primes_up_to;
+    use crate::prime_bitset::PrimeBitset;
     use crate::sieve::sieve_to;
 
     if x < 2 {
@@ -69,9 +69,10 @@ pub fn prime_pi_dr_meissel_v4(x: u128) -> u128 {
     let s1 = s1_ordinary(x, y, C, &seed_primes);
 
     // ── 4+5. S2_hard + P2 in one combined sweep ───────────────────────────────
-    let all_primes = primes_up_to(sqrt_x, &seed_primes);
-    let s2_primes = &all_primes[a..];
-    let (s2_hard, p2, _profile) = hard::s2_hard_sieve_par(x, y, z, C, b_max, a, &seed_primes, s2_primes);
+    // s2_primes covers (y, √x]: built directly as a wheel-30 packed bitset
+    // (~33 MB at √x = 1e9 vs ~203 MB for the previous Vec<u32>).
+    let s2_primes = PrimeBitset::new(y + 1, sqrt_x, &seed_primes);
+    let (s2_hard, p2, _profile) = hard::s2_hard_sieve_par(x, y, z, C, b_max, a, &seed_primes, &s2_primes);
 
     // ── 6. π(x) = φ(x, a) + a − 1 − P2  with φ(x,a) = S1 + S2_hard ─────────
     let phi_x_a = (s1 + s2_hard) as u128;
@@ -83,7 +84,7 @@ pub fn prime_pi_dr_meissel_v4(x: u128) -> u128 {
 pub fn prime_pi_dr_meissel_v4_timed(x: u128) -> (u128, [std::time::Duration; 5], hard::HardProfile) {
     use crate::math::{icbrt, isqrt};
     use crate::phi::s1_ordinary;
-    use crate::segment::primes_up_to;
+    use crate::prime_bitset::PrimeBitset;
     use crate::sieve::sieve_to;
     use std::time::Instant;
 
@@ -105,8 +106,7 @@ pub fn prime_pi_dr_meissel_v4_timed(x: u128) -> (u128, [std::time::Duration; 5],
     let a = seed_primes.len();
     let sqrty = isqrt(y as u128) as u64;
     let b_max = seed_primes.partition_point(|&p| p <= sqrty);
-    let all_primes = primes_up_to(sqrt_x, &seed_primes);
-    let s2_primes = &all_primes[a..];
+    let s2_primes = PrimeBitset::new(y + 1, sqrt_x, &seed_primes);
     times[0] = t0.elapsed();
 
     if a <= C {
@@ -122,7 +122,7 @@ pub fn prime_pi_dr_meissel_v4_timed(x: u128) -> (u128, [std::time::Duration; 5],
 
     // step3: S2_hard + P2 combined
     let t2 = Instant::now();
-    let (s2_hard, p2, profile) = hard::s2_hard_sieve_par(x, y, z, C, b_max, a, &seed_primes, s2_primes);
+    let (s2_hard, p2, profile) = hard::s2_hard_sieve_par(x, y, z, C, b_max, a, &seed_primes, &s2_primes);
     times[2] = t2.elapsed();
 
     let phi_x_a = (s1 + s2_hard) as u128;

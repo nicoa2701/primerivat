@@ -188,7 +188,7 @@ pub fn s2_hard_sieve_par(
     b_max: usize,
     a: usize,
     primes: &[u64],
-    s2_primes: &[u32], // primes in (∛x, √x] for P2 = Σ(π(x/p) − (π(p)−1))
+    s2_primes: &crate::prime_bitset::PrimeBitset, // primes in (y, √x] for P2 = Σ(π(x/p) − (π(p)−1))
 ) -> (i128, u128, HardProfile) {
     use crate::factor_table::FactorTable;
     use crate::segment::{advance_wheel_primes, count_primes_in_segment, MonoCount, WheelPrimeData, WheelSieve30, W30_IDX, W30_SEG, W30_WORDS, wheel30_next_k};
@@ -476,19 +476,31 @@ pub fn s2_hard_sieve_par(
     // π(lo_start − 1) = seed primes strictly below lo_start (s2_primes > y ≥ lo_start).
     let initial_p2_offset: i64 = primes.partition_point(|&p| p < lo_start) as i64;
 
-    // Per-band P2 query ranges: s2_primes sorted ascending (p↑ → q=x/p ↓).
-    // Band [band_lo, band_hi) captures queries with q_k ∈ [band_lo, band_hi).
-    //   q_k ≥ band_lo  ↔  p_k ≤ x/band_lo  ↔  index < end
-    //   q_k < band_hi  ↔  p_k > x/band_hi   ↔  index ≥ start
-    let p2_ranges: Vec<(usize, usize)> = (0..num_bands)
+    // Per-band P2 walker setup: s2_primes is iterated **descending** in p
+    // (= ascending in q = x/p), so we initialise the walker at the largest
+    // prime ≤ x/band_lo and stop when the walker's rank drops below the
+    // first prime > x/band_hi. Both `start_n` and `min_rank` are derived
+    // from the bitset's `count_le`, replacing the prior `partition_point`
+    // pair on the Vec<u32> slice.
+    //   q_k ≥ band_lo  ↔  p_k ≤ x/band_lo  → walker initial position
+    //   q_k < band_hi  ↔  p_k > x/band_hi  → walker termination rank
+    let p2_band_setup: Vec<(u64, usize)> = (0..num_bands)
         .map(|t| {
             let band_lo = band_bounds[t];
             let band_hi = band_bounds[t + 1].min(z + W30_SEG as u64);
-            let end   = if band_lo == 0 { s2_primes.len() } else {
-                s2_primes.partition_point(|&p| (x / p as u128) as u64 >= band_lo)
+            let walker_start_n = if band_lo == 0 {
+                s2_primes.hi()
+            } else {
+                ((x / band_lo as u128) as u64).min(s2_primes.hi())
             };
-            let start = s2_primes.partition_point(|&p| (x / p as u128) as u64 >= band_hi);
-            (start, end)
+            // band_min_rank = count of bitset primes ≤ x/band_hi → first
+            // prime kept has rank ≥ this; smaller-rank primes have q ≥ band_hi.
+            let band_min_rank = if band_hi == 0 {
+                s2_primes.total()
+            } else {
+                s2_primes.count_le((x / band_hi as u128) as u64)
+            };
+            (walker_start_n, band_min_rank)
         })
         .collect();
 
@@ -639,7 +651,7 @@ pub fn s2_hard_sieve_par(
         let num_bands_u = num_bands as u64;
         let n_threads = rayon::current_num_threads() as u64;
         let primes_bytes = (primes.len() as u64) * 8;
-        let s2_primes_bytes = (s2_primes.len() as u64) * 4;
+        let s2_primes_bytes = s2_primes.size_bytes() as u64;
         let pb_data_bytes = ((a - c) as u64) * 80;
         let phi_band_inits_bytes = num_bands_u * b_ext_u * 8;
         let bandsweep_per = b_ext_u * 16; // delta + bi_contrib (Vec data, ignoring header)
@@ -658,12 +670,9 @@ pub fn s2_hard_sieve_par(
                    threads={n_threads}]");
         eprintln!("  primes (= seed)        : {:>11} entries × 8B  = {:>9.1} MB",
                   primes.len(), mb(primes_bytes));
-        eprintln!("  s2_primes (slice)      : {:>11} entries × 4B  = {:>9.1} MB \
-                   (lives in all_primes)", s2_primes.len(), mb(s2_primes_bytes));
-        eprintln!("  all_primes (total)     : {:>11} entries        = {:>9.1} MB \
-                   (seed u64 + s2 u32)",
-                  primes.len() + s2_primes.len(),
-                  mb(primes_bytes + s2_primes_bytes));
+        eprintln!("  s2_primes (PrimeBitset): {:>11} primes wheel-30 = {:>9.1} MB \
+                   (replaces all_primes Vec<u32>)",
+                  s2_primes.total(), mb(s2_primes_bytes));
         eprintln!("  factor (μ, lpf) table  : {:>11} slots   × 2B = {:>9.1} MB \
                    (y={y}, replaces hard_leaves)",
                   factor.len(), mb(factor_bytes));
@@ -747,8 +756,12 @@ pub fn s2_hard_sieve_par(
                 );
             }
 
-            let (p2_start, p2_end) = p2_ranges[t];
-            let mut p2_ptr = p2_end; // exclusive, counts down to p2_start
+            // Per-band P2 walker: descends through s2_primes from largest p
+            // (smallest q = x/p) toward smallest p (largest q). Stops once
+            // walker.rank() < p2_min_rank, i.e. once the next prime would
+            // have q ≥ band_hi (out of this band's q-range).
+            let (walker_start_n, p2_min_rank) = p2_band_setup[t];
+            let mut p2_walker = s2_primes.walker_at(walker_start_n);
 
             let mut tiny_state = phi_tiny_state(band_lo);
             let mut sieve      = WheelSieve30::new();
@@ -1048,8 +1061,8 @@ pub fn s2_hard_sieve_par(
 
                 let t_p2 = Instant::now();
                 // ── P2 queries ─────────────────────────────────────────────
-                if p2_ptr > p2_start {
-                    let q_check = (x / s2_primes[p2_ptr - 1] as u128) as u64;
+                if !p2_walker.is_done() && p2_walker.rank() >= p2_min_rank {
+                    let q_check = (x / p2_walker.p() as u128) as u64;
                     if q_check >= lo && q_check < hi {
                         if !p2_prefix_ready {
                             let t_pref = Instant::now();
@@ -1064,14 +1077,15 @@ pub fn s2_hard_sieve_par(
                             // in this segment (last section before advance).
                         }
                         loop {
-                            if p2_ptr <= p2_start { break; }
-                            let j   = p2_ptr - 1;
-                            let q_k = (x / s2_primes[j] as u128) as u64;
+                            if p2_walker.is_done() || p2_walker.rank() < p2_min_rank { break; }
+                            let p   = p2_walker.p();
+                            let j   = p2_walker.rank();
+                            let q_k = (x / p as u128) as u64;
                             if q_k >= hi { break; }
-                            if q_k < lo  { p2_ptr -= 1; continue; }
+                            if q_k < lo  { p2_walker.advance(); continue; }
                             let raw = sieve.count_primes_upto_int(&p2_prefix, q_k, lo);
                             let seed_in_query: i32 = if lo < y {
-                                let j2 = primes.partition_point(|&p| p <= q_k);
+                                let j2 = primes.partition_point(|&p_inner| p_inner <= q_k);
                                 (j2 - seed_below_lo) as i32
                             } else { 0 };
                             // Fold P2: pi_qk = p2_init[t] + V, V = local_p2
@@ -1084,7 +1098,7 @@ pub fn s2_hard_sieve_par(
                             let k = (a + j) as i64;
                             p2_partial += (v - k) as i128;
                             p2_q_count += 1;
-                            p2_ptr -= 1;
+                            p2_walker.advance();
                         }
                     }
                 }

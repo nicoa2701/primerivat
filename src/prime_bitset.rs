@@ -104,13 +104,22 @@ impl PrimeBitset {
     ///
     /// Primes 2, 3, 5 are never stored (not coprime to 30).
     pub fn new(lo: u64, hi: u64, sieve_primes: &[u64]) -> Self {
-        assert!(lo <= hi, "PrimeBitset::new: lo {lo} > hi {hi}");
+        // Empty bitset: lo > hi (range void) or hi < 7 (no representable
+        // primes; 2/3/5 are excluded by the wheel base).
+        if lo > hi || hi < 7 {
+            return Self {
+                lo, hi,
+                bits: Vec::new(),
+                prefix: vec![0u32; 1],
+                total: 0,
+            };
+        }
         assert!(hi <= u32::MAX as u64, "PrimeBitset::new: hi {hi} > u32::MAX");
 
         let n_words = (hi / NUMBERS_PER_WORD + 1) as usize;
         let mut bits = vec![0u64; n_words];
 
-        if hi >= 7 {
+        {
             use crate::segment::{advance_small_primes, init_small_primes, SegSieve, SEG};
             let sieve_lo = (lo / SEG as u64) * SEG as u64;
             let mut sieve = SegSieve::new();
@@ -155,7 +164,7 @@ impl PrimeBitset {
     /// Number of primes in `[lo, n]`. Returns 0 for `n < lo` and `total()`
     /// for `n ≥ hi` (clamped).
     pub fn count_le(&self, n: u64) -> usize {
-        if n < self.lo { return 0; }
+        if self.total == 0 || n < self.lo { return 0; }
         let n = n.min(self.hi);
         let word = (n / NUMBERS_PER_WORD) as usize;
         let block = word / WORDS_PER_BLOCK;

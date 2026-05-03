@@ -1274,66 +1274,6 @@ pub fn advance_wheel_primes(state: &mut [(u64, u64)], next_lo: u64) {
     }
 }
 
-/// Returns all primes in `[2, limit]` using the provided sieving primes.
-///
-/// `sieve_primes` must contain all primes ≤ √limit.  Each prime in
-/// `sieve_primes` is included in the output if it is ≤ `limit`.
-///
-/// Intended use: given seed primes ≤ y = ∛x from the Lucy sieve, extend to
-/// all primes ≤ √x so that `s2_primes = &all_primes[a..]` covers (y, √x].
-pub fn primes_up_to(limit: u64, sieve_primes: &[u64]) -> Vec<u32> {
-    // Returns u32 to halve the storage of the largest collection in the DR
-    // pipeline (`all_primes` is ~50 M entries × 8 B = 388 MB at x=1e18, dropped
-    // to ~194 MB by switching to u32). Safe for any `√x` ≤ u32::MAX = 4.29e9,
-    // i.e. x ≤ ~1.84e19, well above the validated range (1e18).
-    debug_assert!(
-        limit <= u32::MAX as u64,
-        "primes_up_to: limit {limit} exceeds u32::MAX"
-    );
-    if limit < 2 {
-        return vec![];
-    }
-
-    // Collect sieve primes that are ≤ limit (they are already prime).
-    let mut result: Vec<u32> = sieve_primes
-        .iter()
-        .copied()
-        .take_while(|&p| p <= limit)
-        .map(|p| p as u32)
-        .collect();
-
-    // If limit ≤ the largest sieve prime we already have, we're done.
-    if sieve_primes.last().copied().unwrap_or(0) >= limit {
-        return result;
-    }
-
-    // Otherwise sweep [max_covered+1, limit] in SEG-sized windows.
-    let start_lo = result.last().copied().map(|p| p as u64 + 1).unwrap_or(2);
-    let mut sieve = SegSieve::new();
-    // Align lo to the SEG boundary at or below start_lo.
-    let lo_init = (start_lo / SEG as u64) * SEG as u64;
-    let mut lo = lo_init;
-
-    let sp = init_small_primes(sieve_primes, lo);
-    let mut state = sp;
-    while lo <= limit {
-        sieve.fill(lo, &state);
-        for p in sieve.iter_primes(lo) {
-            if p < start_lo {
-                continue;
-            }
-            if p > limit {
-                break;
-            }
-            result.push(p as u32);
-        }
-        let next_lo = lo + SEG as u64;
-        advance_small_primes(&mut state, next_lo);
-        lo = next_lo;
-    }
-    result
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
