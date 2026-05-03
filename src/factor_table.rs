@@ -1,9 +1,8 @@
 //! Compact `(μ, lpf)` lookup table for streaming hard-leaf enumeration.
 //!
-//! POC scaffolding for cible #4 (target: drop `hard_leaves` 602 MB by
-//! generating leaves on the fly). Not yet wired into the DR engine —
-//! see `tests` below for the bit-exact equivalence check vs the current
-//! recursive enumeration in `dr::hard::enumerate_hard_leaves`.
+//! Wired into [`crate::dr::hard::s2_hard_sieve_par`] — replaces the prior
+//! per-bi sorted leaf lists (`Vec<Vec<(u64, i8)>>`) with a single shared
+//! u16 table that each band walks via a descending cursor.
 //!
 //! # Data structure
 //!
@@ -27,9 +26,8 @@
 //!
 //! 480 of every 2310 consecutive integers are coprime to {2,3,5,7,11},
 //! and we store 2 B per slot, so the table costs ≈ y × 480/2310 × 2 ≈
-//! y × 0.416 B. At y = 2e6 (DR config at x = 1e18 α=2): ~830 KB.
-//! Compare to the present `hard_leaves: Vec<Vec<(u64, i8)>>` which
-//! holds 39.5 M entries × 16 B ≈ 602 MB at the same x.
+//! y × 0.416 B. At y = 2e6 (DR config at x = 1e18 α=2): ~830 KB —
+//! compared to ~602 MB for the previous per-bi sorted leaf lists.
 //!
 //! # Validity bound
 //!
@@ -257,6 +255,25 @@ impl FactorTable {
         (COPRIME_LEN as u64 * q) as usize + cop_idx as usize
     }
 
+    /// Number → factor-table index, floored. Returns the largest `i` such
+    /// that `to_number(i) ≤ n`, or `-1` if no such index exists in the
+    /// table range. Accepts arbitrary `n` (not just wheel-coprime ones).
+    #[inline]
+    pub fn to_index_floor(n: u64) -> i64 {
+        if n == 0 { return -1; }
+        let q = n / WHEEL;
+        let r = (n % WHEEL) as usize;
+        let cop_idx = coprime_indexes_table()[r];
+        if cop_idx >= 0 {
+            (COPRIME_LEN as i64) * (q as i64) + cop_idx as i64
+        } else if q == 0 {
+            -1
+        } else {
+            // r = 0, q ≥ 1 → fall back to the last coprime of the previous block.
+            (COPRIME_LEN as i64) * (q as i64) - 1
+        }
+    }
+
     /// Factor-table index → number. The result is coprime to {2,3,5,7,11}.
     #[inline]
     pub fn to_number(idx: usize) -> u64 {
@@ -328,6 +345,20 @@ mod tests {
         }
         assert_eq!(idx[13], 1);
         assert_eq!(idx[2309], 479);
+    }
+
+    #[test]
+    fn to_index_floor_basics() {
+        assert_eq!(FactorTable::to_index_floor(0), -1);
+        assert_eq!(FactorTable::to_index_floor(1), 0);
+        assert_eq!(FactorTable::to_index_floor(12), 0);
+        assert_eq!(FactorTable::to_index_floor(13), 1);
+        assert_eq!(FactorTable::to_index_floor(14), 1);
+        assert_eq!(FactorTable::to_index_floor(16), 1);
+        assert_eq!(FactorTable::to_index_floor(17), 2);
+        assert_eq!(FactorTable::to_index_floor(2309), 479);
+        assert_eq!(FactorTable::to_index_floor(2310), 479);
+        assert_eq!(FactorTable::to_index_floor(2311), 480);
     }
 
     #[test]

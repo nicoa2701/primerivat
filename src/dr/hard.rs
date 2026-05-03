@@ -14,7 +14,7 @@ pub struct HardProfile {
     pub sweep_bi_main_ns: u64,
 
     /// Subset of `sweep_bi_main_ns` spent inside `if has_leaf { … }` (popcount
-    /// + hard_ptrs / easy_ptrs walk + fold accumulators). Bracketed only when
+    /// + factor-table walk / easy_ptrs walk + fold accumulators). Bracketed only when
     /// a leaf actually fires, so the timer adds ~2 × n_bi_leaf_hits Instant
     /// calls (~0.3 % overhead at x=1e17 α=2). The xoff share is derived as
     /// `sweep_bi_main_ns − sweep_bi_main_leaf_ns` at print time.
@@ -87,28 +87,6 @@ pub struct BandProfile {
     pub n_ext_emitted: u64,
     pub n_prefix_fills: u64,
     pub n_bulk_active_sum: u64,
-}
-
-fn enumerate_hard_leaves(
-    x: u128,
-    pb: u64,
-    max_m: u64,
-    primes: &[u64],
-    start: usize,  // index in primes of first prime > pb
-    m: u64,
-    mu: i8,
-    out: &mut Vec<(u64, i8)>,
-) {
-    for i in start..primes.len() {
-        let p = primes[i];
-        let nm = match (m as u128).checked_mul(p as u128) {
-            Some(v) if v <= max_m as u128 => v as u64,
-            _ => break,
-        };
-        let n = (x / (pb as u128 * nm as u128)) as u64;
-        out.push((n, -mu)); // μ(nm) = -μ(m)
-        enumerate_hard_leaves(x, pb, max_m, primes, i + 1, nm, -mu, out);
-    }
 }
 
 /// Computes S2_hard = −Σ_{b=c+1}^{b_max} Σ_{m: squarefree, lpf(m)>p_b, p_b·m>y}
@@ -212,9 +190,55 @@ pub fn s2_hard_sieve_par(
     primes: &[u64],
     s2_primes: &[u32], // primes in (∛x, √x] for P2 = Σ(π(x/p) − (π(p)−1))
 ) -> (i128, u128, HardProfile) {
+    use crate::factor_table::FactorTable;
     use crate::segment::{advance_wheel_primes, count_primes_in_segment, MonoCount, WheelPrimeData, WheelSieve30, W30_IDX, W30_SEG, W30_WORDS, wheel30_next_k};
     use rayon::prelude::*;
     use std::time::Instant;
+
+    // Refill `hard_next_n[bi]`/`hard_next_mu[bi]` by walking the descending
+    // factor-table cursor `hard_idx[bi]` until the next hard leaf for prime
+    // `pb` is reached, or until the cursor crosses `min_idx` (exclusive lower
+    // bound = `to_index_floor(pb)` so that the m=pb sentinel is skipped). On
+    // exhaustion the cached n is set to `u64::MAX`, which makes `has_leaf`
+    // permanently false for that bi until the next band setup. The hot
+    // `has_leaf` path then stays a single load + compare.
+    #[inline(always)]
+    fn refill_hard_next(
+        factor: &FactorTable,
+        hard_idx: &mut [i64],
+        hard_next_n: &mut [u64],
+        hard_next_mu: &mut [i8],
+        bi: usize,
+        pb: u64,
+        pb_u16: u16,
+        min_idx: i64,
+        x: u128,
+    ) {
+        let mut idx = hard_idx[bi];
+        while idx > min_idx {
+            let f = factor.mu_lpf(idx as usize);
+            // f > pb_u16 alone covers the hard-leaf predicate:
+            //   f = 0          → μ(m) = 0,    rejected (0 ≤ pb_u16)
+            //   f = lpf − 1    → μ = +1, lpf > pb + 1 ≥ pb (off-by-1 OK
+            //                    because primes pb ≥ 13 are odd and lpf is
+            //                    an odd prime, so lpf = pb + 1 is impossible)
+            //   f = lpf        → μ = −1, lpf > pb
+            //   f = U16_MAX    → m prime, m > pb (m = pb is excluded by min_idx)
+            if f > pb_u16 {
+                let m = FactorTable::to_number(idx as usize);
+                let mu = factor.mu(idx as usize);
+                let n = (x / (pb as u128 * m as u128)) as u64;
+                hard_next_n[bi] = n;
+                hard_next_mu[bi] = mu;
+                hard_idx[bi] = idx - 1;
+                return;
+            }
+            idx -= 1;
+        }
+        hard_next_n[bi] = u64::MAX;
+        hard_next_mu[bi] = 0;
+        hard_idx[bi] = min_idx;
+    }
 
     // Reads /proc/self/status VmRSS in MB (Linux only; returns 0 elsewhere).
     // Used by RIVAT3_MEM_DUMP checkpoints to localize the allocation phase.
@@ -295,19 +319,15 @@ pub fn s2_hard_sieve_par(
     // n_ext_easy: easy bi values below b_ext that still use phi_vec
     let n_ext_easy = b_ext.saturating_sub(n_hard);
 
-    // ── Build leaf lists for HARD bi only ────────────────────────────────────
-    // Easy leaves computed on-the-fly → zero O(a²) allocation.
-    ck!("before hard_leaves enumeration");
-    let mut hard_leaves: Vec<Vec<(u64, i8)>> = Vec::with_capacity(n_hard);
-    for bi in 0..n_hard {
-        let b  = bi + c + 1;
-        let pb = primes[b - 1];
-        let mut leaves: Vec<(u64, i8)> = Vec::new();
-        enumerate_hard_leaves(x, pb, y, primes, b, 1u64, 1i8, &mut leaves);
-        leaves.sort_unstable_by_key(|&(n, _)| n);
-        hard_leaves.push(leaves);
-    }
-    ck!("after  hard_leaves enumeration");
+    // ── Compact (μ, lpf) factor table for streaming hard-leaf enumeration ───
+    // Replaces the prior `hard_leaves: Vec<Vec<(u64, i8)>>` (sorted leaf
+    // lists per hard bi). Each band keeps a per-bi descending cursor into
+    // this table and produces the next leaf on demand — same has_leaf hot-
+    // path cost (one cached load + compare) but no persistent leaf storage.
+    // At x = 1e18 α = 2: ~602 MB → ~830 KB.
+    ck!("before factor table build");
+    let factor = FactorTable::new(y);
+    ck!("after  factor table build");
 
     // ── Compute lo_start ─────────────────────────────────────────────────────
     let n_min_hard: u64 = if n_hard > 0 && b_max > 0 {
@@ -612,10 +632,7 @@ pub fn s2_hard_sieve_par(
     // actual structures. Helps decide which compaction target to attack first.
     if std::env::var("RIVAT3_MEM_DUMP").is_ok() {
         let mb = |bytes: u64| (bytes as f64) / (1024.0 * 1024.0);
-        let n_leaves: u64 =
-            hard_leaves.iter().map(|v| v.len() as u64).sum();
-        let leaf_elem = std::mem::size_of::<(u64, i8)>() as u64;
-        let leaf_bytes = n_leaves * leaf_elem;
+        let factor_bytes = factor.size_bytes() as u64;
         let bulk_cap = (n_all.saturating_sub(b_ext)) as u64;
         let n_easy_u = n_easy as u64;
         let b_ext_u  = b_ext as u64;
@@ -647,8 +664,9 @@ pub fn s2_hard_sieve_par(
                    (seed u64 + s2 u32)",
                   primes.len() + s2_primes.len(),
                   mb(primes_bytes + s2_primes_bytes));
-        eprintln!("  hard_leaves            : {:>11} leaves  × {}B = {:>9.1} MB",
-                  n_leaves, leaf_elem, mb(leaf_bytes));
+        eprintln!("  factor (μ, lpf) table  : {:>11} slots   × 2B = {:>9.1} MB \
+                   (y={y}, replaces hard_leaves)",
+                  factor.len(), mb(factor_bytes));
         eprintln!("  pb_data                : {:>11} primes  × 80B = {:>9.1} MB",
                   a - c, mb(pb_data_bytes));
         eprintln!("  phi_band_inits         : {:>11} entries × 8B  = {:>9.1} MB",
@@ -658,7 +676,7 @@ pub fn s2_hard_sieve_par(
                   mb(bandsweep_total));
         eprintln!("  per-thread temp peak   : {} × {:.1} MB = {:>9.1} MB \
                    (transient)", n_threads, mb(per_thread_temp), mb(per_thread_total));
-        let accountable = primes_bytes + s2_primes_bytes + leaf_bytes
+        let accountable = primes_bytes + s2_primes_bytes + factor_bytes
             + pb_data_bytes + phi_band_inits_bytes + bandsweep_total
             + per_thread_total;
         eprintln!("  accountable subtotal   : {:>9.1} MB", mb(accountable));
@@ -704,9 +722,30 @@ pub fn s2_hard_sieve_par(
             let (mut easy_ptrs, mut easy_next_n): (Vec<usize>, Vec<u64>) =
                 (0..n_easy).map(|ei| init_easy(ei, band_lo)).unzip();
 
-            let mut hard_ptrs: Vec<usize> = (0..n_hard)
-                .map(|bi| hard_leaves[bi].partition_point(|&(n, _)| n < band_lo))
-                .collect();
+            // Per-bi descending cursor into the factor table + cached next
+            // hard leaf. `hard_min_idx[bi]` = `to_index_floor(pb)` (exclusive
+            // lower bound, so m=pb is never visited and the predicate
+            // `f > pb_u16` does the right thing for prime m too).
+            let mut hard_idx:      Vec<i64> = vec![-1; n_hard];
+            let mut hard_next_n:   Vec<u64> = vec![u64::MAX; n_hard];
+            let mut hard_next_mu:  Vec<i8>  = vec![0; n_hard];
+            let mut hard_min_idx:  Vec<i64> = vec![-1; n_hard];
+            for bi in 0..n_hard {
+                let pb     = primes[bi + c];
+                let pb_u16 = pb as u16;
+                hard_min_idx[bi] = FactorTable::to_index_floor(pb);
+                let m_top = if band_lo == 0 {
+                    y
+                } else {
+                    ((x / (pb as u128 * band_lo as u128)) as u64).min(y)
+                };
+                hard_idx[bi] = FactorTable::to_index_floor(m_top);
+                refill_hard_next(
+                    &factor,
+                    &mut hard_idx, &mut hard_next_n, &mut hard_next_mu,
+                    bi, pb, pb_u16, hard_min_idx[bi], x,
+                );
+            }
 
             let (p2_start, p2_end) = p2_ranges[t];
             let mut p2_ptr = p2_end; // exclusive, counts down to p2_start
@@ -772,11 +811,8 @@ pub fn s2_hard_sieve_par(
                     let pb = primes[b - 1];
 
                     let has_leaf = if bi < n_hard {
-                        let ptr = hard_ptrs[bi];
-                        ptr < hard_leaves[bi].len() && {
-                            let (n, _) = hard_leaves[bi][ptr];
-                            n >= lo && n < hi && n <= z
-                        }
+                        let n = hard_next_n[bi];
+                        n >= lo && n < hi && n <= z
                     } else {
                         let ei = bi - n_hard; // ei < far_easy_start
                         easy_ptrs[ei] < a && {
@@ -798,11 +834,13 @@ pub fn s2_hard_sieve_par(
                         let snap_phi = delta[bi];
 
                         if bi < n_hard {
-                            let ptr = &mut hard_ptrs[bi];
-                            while *ptr < hard_leaves[bi].len() {
-                                let (n, mu) = hard_leaves[bi][*ptr];
+                            let pb_u16  = pb as u16;
+                            let min_idx = hard_min_idx[bi];
+                            loop {
+                                let n = hard_next_n[bi];
                                 if n >= hi || n > z { break; }
                                 if n >= lo {
+                                    let mu = hard_next_mu[bi];
                                     let popcount =
                                         sieve.count_primes_upto_int_m(&mut mono, n, lo);
                                     // Fold: phi_n = phi_init[bi] + snap_phi + popcount.
@@ -812,7 +850,11 @@ pub fn s2_hard_sieve_par(
                                         * ((snap_phi + popcount as i64) as i128);
                                     bi_contrib[bi] += sign;
                                 }
-                                *ptr += 1;
+                                refill_hard_next(
+                                    &factor,
+                                    &mut hard_idx, &mut hard_next_n, &mut hard_next_mu,
+                                    bi, pb, pb_u16, min_idx, x,
+                                );
                             }
                         } else {
                             let ei = bi - n_hard;
