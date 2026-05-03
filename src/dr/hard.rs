@@ -210,7 +210,7 @@ pub fn s2_hard_sieve_par(
     b_max: usize,
     a: usize,
     primes: &[u64],
-    s2_primes: &[u64], // primes in (∛x, √x] for P2 = Σ(π(x/p) − (π(p)−1))
+    s2_primes: &[u32], // primes in (∛x, √x] for P2 = Σ(π(x/p) − (π(p)−1))
 ) -> (i128, u128, HardProfile) {
     use crate::segment::{advance_wheel_primes, count_primes_in_segment, MonoCount, WheelPrimeData, WheelSieve30, W30_IDX, W30_SEG, W30_WORDS, wheel30_next_k};
     use rayon::prelude::*;
@@ -622,7 +622,7 @@ pub fn s2_hard_sieve_par(
         let num_bands_u = num_bands as u64;
         let n_threads = rayon::current_num_threads() as u64;
         let primes_bytes = (primes.len() as u64) * 8;
-        let s2_primes_bytes = (s2_primes.len() as u64) * 8;
+        let s2_primes_bytes = (s2_primes.len() as u64) * 4;
         let pb_data_bytes = ((a - c) as u64) * 80;
         let phi_band_inits_bytes = num_bands_u * b_ext_u * 8;
         let bandsweep_per = b_ext_u * 16; // delta + bi_contrib (Vec data, ignoring header)
@@ -641,9 +641,10 @@ pub fn s2_hard_sieve_par(
                    threads={n_threads}]");
         eprintln!("  primes (= seed)        : {:>11} entries × 8B  = {:>9.1} MB",
                   primes.len(), mb(primes_bytes));
-        eprintln!("  s2_primes (slice)      : {:>11} entries × 8B  = {:>9.1} MB \
+        eprintln!("  s2_primes (slice)      : {:>11} entries × 4B  = {:>9.1} MB \
                    (lives in all_primes)", s2_primes.len(), mb(s2_primes_bytes));
-        eprintln!("  all_primes (total)     : {:>11} entries × 8B  = {:>9.1} MB",
+        eprintln!("  all_primes (total)     : {:>11} entries        = {:>9.1} MB \
+                   (seed u64 + s2 u32)",
                   primes.len() + s2_primes.len(),
                   mb(primes_bytes + s2_primes_bytes));
         eprintln!("  hard_leaves            : {:>11} leaves  × {}B = {:>9.1} MB",
