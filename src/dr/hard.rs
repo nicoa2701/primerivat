@@ -216,6 +216,37 @@ pub fn s2_hard_sieve_par(
     use rayon::prelude::*;
     use std::time::Instant;
 
+    // Reads /proc/self/status VmRSS in MB (Linux only; returns 0 elsewhere).
+    // Used by RIVAT3_MEM_DUMP checkpoints to localize the allocation phase.
+    fn proc_rss_mb() -> f64 {
+        #[cfg(target_os = "linux")]
+        {
+            if let Ok(s) = std::fs::read_to_string("/proc/self/status") {
+                for line in s.lines() {
+                    if let Some(rest) = line.strip_prefix("VmRSS:") {
+                        if let Some(kb_str) = rest.split_whitespace().next() {
+                            if let Ok(kb) = kb_str.parse::<u64>() {
+                                return (kb as f64) / 1024.0;
+                            }
+                        }
+                    }
+                }
+            }
+            0.0
+        }
+        #[cfg(not(target_os = "linux"))]
+        { 0.0 }
+    }
+    let mem_dump = std::env::var("RIVAT3_MEM_DUMP").is_ok();
+    macro_rules! ck {
+        ($label:expr) => {
+            if mem_dump {
+                eprintln!("[mem-rss @ {}]: {:.0} MB", $label, proc_rss_mb());
+            }
+        };
+    }
+    ck!("entry s2_hard_sieve_par");
+
     // Phi-style wheel-sieve init: primes {2,3,5} are absorbed into the wheel;
     // only primes[3..c] = {7, 11, …} need explicit crossing-off.
     // m is the first coprime-to-30 multiple of p that is ≥ lo (phi-style: start
@@ -266,6 +297,7 @@ pub fn s2_hard_sieve_par(
 
     // ── Build leaf lists for HARD bi only ────────────────────────────────────
     // Easy leaves computed on-the-fly → zero O(a²) allocation.
+    ck!("before hard_leaves enumeration");
     let mut hard_leaves: Vec<Vec<(u64, i8)>> = Vec::with_capacity(n_hard);
     for bi in 0..n_hard {
         let b  = bi + c + 1;
@@ -275,6 +307,7 @@ pub fn s2_hard_sieve_par(
         leaves.sort_unstable_by_key(|&(n, _)| n);
         hard_leaves.push(leaves);
     }
+    ck!("after  hard_leaves enumeration");
 
     // ── Compute lo_start ─────────────────────────────────────────────────────
     let n_min_hard: u64 = if n_hard > 0 && b_max > 0 {
@@ -609,6 +642,64 @@ pub fn s2_hard_sieve_par(
         let next_n = (x / (pb as u128 * primes[pl_idx] as u128)) as u64;
         (pl_idx, next_n)
     };
+
+    // ── Memory instrumentation (opt-in via RIVAT3_MEM_DUMP=1) ───────────────
+    // Prints accountable bytes of the top allocations right before the parallel
+    // sweep starts, so the user can correlate /usr/bin/time -v RSS with the
+    // actual structures. Helps decide which compaction target to attack first.
+    if std::env::var("RIVAT3_MEM_DUMP").is_ok() {
+        let mb = |bytes: u64| (bytes as f64) / (1024.0 * 1024.0);
+        let n_leaves: u64 =
+            hard_leaves.iter().map(|v| v.len() as u64).sum();
+        let leaf_elem = std::mem::size_of::<(u64, i8)>() as u64;
+        let leaf_bytes = n_leaves * leaf_elem;
+        let bulk_cap = (n_all.saturating_sub(b_ext)) as u64;
+        let n_easy_u = n_easy as u64;
+        let b_ext_u  = b_ext as u64;
+        let num_bands_u = num_bands as u64;
+        let n_threads = rayon::current_num_threads() as u64;
+        let primes_bytes = (primes.len() as u64) * 8;
+        let s2_primes_bytes = (s2_primes.len() as u64) * 8;
+        let pb_data_bytes = ((a - c) as u64) * 80;
+        let phi_band_inits_bytes = num_bands_u * b_ext_u * 8;
+        let bandsweep_per = b_ext_u * 16; // delta + bi_contrib (Vec data, ignoring header)
+        let bandsweep_total = num_bands_u * bandsweep_per;
+        let per_thread_temp =
+              n_easy_u * 8     // easy_ptrs
+            + n_easy_u * 8     // easy_next_n
+            + bulk_cap * 8     // bulk_next_m
+            + bulk_cap * 1     // bulk_next_j
+            + b_ext_u * 8      // delta
+            + b_ext_u * 8;     // bi_contrib
+        let per_thread_total = n_threads * per_thread_temp;
+
+        eprintln!("[mem-dump x={x} y={y} a={a} b_ext={b_ext} n_hard={n_hard} \
+                   n_easy={n_easy} bulk_cap={bulk_cap} num_bands={num_bands} \
+                   threads={n_threads}]");
+        eprintln!("  primes (= seed)        : {:>11} entries × 8B  = {:>9.1} MB",
+                  primes.len(), mb(primes_bytes));
+        eprintln!("  s2_primes (slice)      : {:>11} entries × 8B  = {:>9.1} MB \
+                   (lives in all_primes)", s2_primes.len(), mb(s2_primes_bytes));
+        eprintln!("  all_primes (total)     : {:>11} entries × 8B  = {:>9.1} MB",
+                  primes.len() + s2_primes.len(),
+                  mb(primes_bytes + s2_primes_bytes));
+        eprintln!("  hard_leaves            : {:>11} leaves  × {}B = {:>9.1} MB",
+                  n_leaves, leaf_elem, mb(leaf_bytes));
+        eprintln!("  pb_data                : {:>11} primes  × 80B = {:>9.1} MB",
+                  a - c, mb(pb_data_bytes));
+        eprintln!("  phi_band_inits         : {:>11} entries × 8B  = {:>9.1} MB",
+                  num_bands * b_ext, mb(phi_band_inits_bytes));
+        eprintln!("  BandSweep result Vec   : {} bands × {:.0} KB    = {:>9.1} MB",
+                  num_bands, (bandsweep_per as f64) / 1024.0,
+                  mb(bandsweep_total));
+        eprintln!("  per-thread temp peak   : {} × {:.1} MB = {:>9.1} MB \
+                   (transient)", n_threads, mb(per_thread_temp), mb(per_thread_total));
+        let accountable = primes_bytes + s2_primes_bytes + leaf_bytes
+            + pb_data_bytes + phi_band_inits_bytes + bandsweep_total
+            + per_thread_total;
+        eprintln!("  accountable subtotal   : {:>9.1} MB", mb(accountable));
+    }
+    ck!("before par_iter (band_sweeps)");
 
     let band_sweeps: Vec<BandSweep> = (0..num_bands)
         .into_par_iter()
@@ -1112,6 +1203,24 @@ pub fn s2_hard_sieve_par(
         })
         .collect();
 
+    ck!("after  par_iter collected");
+    if mem_dump {
+        let total_ext_stored: usize =
+            band_sweeps.iter().map(|b| b.8.len()).sum();
+        let max_ext_stored: usize =
+            band_sweeps.iter().map(|b| b.8.len()).max().unwrap_or(0);
+        let nonzero_bands: usize =
+            band_sweeps.iter().filter(|b| !b.8.is_empty()).count();
+        let ext_rec_size = std::mem::size_of::<ExtEasyRec>();
+        let ext_bytes = (total_ext_stored * ext_rec_size) as f64
+            / (1024.0 * 1024.0);
+        eprintln!(
+            "[ext_stored audit]: total={} records, max={}/band, \
+             nonzero_bands={}/{}, sizeof(ExtEasyRec)={} → {:.1} MB",
+            total_ext_stored, max_ext_stored, nonzero_bands, num_bands,
+            ext_rec_size, ext_bytes);
+    }
+
     // ── Sequential prefix scan for phi / P2 per band ─────────────────────────
     let mut phi_band_inits: Vec<Vec<i64>> = vec![vec![0i64; b_ext]; num_bands];
     phi_band_inits[0] = initial_phi_vec;
@@ -1164,6 +1273,8 @@ pub fn s2_hard_sieve_par(
             n_bulk_active_sum: s.n_bulk_active_sum,
         });
     }
+
+    ck!("before resolution pass");
 
     // ── Resolution pass (parallel per band) ──────────────────────────────────
     let t_resolve = Instant::now();
@@ -1230,5 +1341,6 @@ pub fn s2_hard_sieve_par(
         n_bulk_active_primes_sum:  agg.n_bulk_active_sum,
         per_band,
     };
+    ck!("end of s2_hard_sieve_par");
     (s2_total, p2_total, profile)
 }
