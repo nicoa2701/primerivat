@@ -1,6 +1,7 @@
 pub mod baseline;
 pub mod cpu_detect;
 pub mod dr;
+pub mod factor_table;
 pub mod math;
 pub mod parameters;
 pub mod phi;
