@@ -175,7 +175,7 @@ struct Cli {
     band_mult_override: Option<usize>,
     b_ext_mult_override: Option<f64>,
     no_deferred_tail_ext: bool,
-    legacy_bulk: bool,
+    bucket_bulk: bool,
 }
 
 enum Mode {
@@ -201,7 +201,7 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
     let mut band_mult_override: Option<usize> = None;
     let mut b_ext_mult_override: Option<f64> = None;
     let mut no_deferred_tail_ext: bool = false;
-    let mut legacy_bulk: bool = false;
+    let mut bucket_bulk: bool = false;
     let mut _used_t_flag = false;
     let mut _used_non_t_option = false;
     let mut mode: Option<Mode> = None;
@@ -255,8 +255,8 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
                 _used_non_t_option = true;
                 i += 1;
             }
-            "--legacy-bulk" => {
-                legacy_bulk = true;
+            "--bucket-bulk" => {
+                bucket_bulk = true;
                 _used_non_t_option = true;
                 i += 1;
             }
@@ -338,7 +338,7 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
         band_mult_override,
         b_ext_mult_override,
         no_deferred_tail_ext,
-        legacy_bulk,
+        bucket_bulk,
     })
 }
 
@@ -587,9 +587,10 @@ fn print_usage(program: &str) {
     eprintln!("  --no-deferred-tail-ext");
     eprintln!("                     Disable the 2-pass deferred tail_ext_emit for heavy bands");
     eprintln!("                     (α=2 log-scale regime). Default off (deferred path enabled).");
-    eprintln!("  --legacy-bulk");
-    eprintln!("                     Force the legacy linear rest_bulk_xoff sweep, bypassing the");
-    eprintln!("                     bucket-sieve path. Default off (bucket-sieve path enabled).");
+    eprintln!("  --bucket-bulk");
+    eprintln!("                     Enable the experimental bucket-sieve rest_bulk_xoff dispatch.");
+    eprintln!("                     Default off (linear sweep — measured 1.93× faster on 9700X");
+    eprintln!("                     at 1e18 vs bucket; flag kept for future experiments).");
     eprintln!();
     eprintln!("Examples:");
     eprintln!("  {} 1e13", program);
@@ -649,8 +650,8 @@ fn main() {
         let _ = rivat3::parameters::set_no_deferred_tail_ext_override(true);
     }
 
-    if cli.legacy_bulk {
-        let _ = rivat3::parameters::set_legacy_bulk_override(true);
+    if cli.bucket_bulk {
+        let _ = rivat3::parameters::set_bucket_bulk_override(true);
     }
 
     match cli.mode {

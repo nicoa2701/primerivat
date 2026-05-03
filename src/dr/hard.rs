@@ -612,11 +612,13 @@ pub fn s2_hard_sieve_par(
         defer_enabled && use_log_scale && t < 2
     };
 
-    // Bucket-sieve dispatch for `rest_bulk_xoff` (cible #1). Default ON.
-    // `--legacy-bulk` / `RIVAT3_LEGACY_BULK=1` falls back to the linear sweep
-    // for A/B benchmarking and bit-exact comparison. Read once outside the
-    // par_iter so every band sees the same value.
-    let legacy_bulk = crate::parameters::legacy_bulk();
+    // Bucket-sieve dispatch for `rest_bulk_xoff` (cible #1). Default OFF
+    // since the linear sweep measured 1.93× faster on 9700X at 1e18
+    // (`pb_data` linear walk benefits from hardware prefetch enough to
+    // out-perform the bucket's per-prime `WheelPrimeData::new(p)` recompute).
+    // Bucket kept opt-in for future experiments (compact `pb_data`, alternate
+    // recompute strategy, etc.). `--bucket-bulk` / `RIVAT3_BUCKET_BULK=1`.
+    let bucket_bulk = crate::parameters::bucket_bulk();
 
     // Per-band easy iterator init, hoisted out of the per-band closure so the
     // pass-2 deferred-tail-ext replay can reuse it for heavy bands. Captures
@@ -814,7 +816,7 @@ pub fn s2_hard_sieve_par(
             // W30_SEG multiple; cheap (8 B) vs. correctness risk.
             let bucket_num_segs =
                 ((band_hi - band_lo) / W30_SEG as u64) as usize + 2;
-            let mut bucket_sieve: Option<BucketSieve> = if !legacy_bulk {
+            let mut bucket_sieve: Option<BucketSieve> = if bucket_bulk {
                 let mut bs = BucketSieve::new(bucket_num_segs);
                 for k in 0..bulk_cap {
                     let p = primes[c + b_ext + k] as u64;
@@ -991,7 +993,7 @@ pub fn s2_hard_sieve_par(
                         bs.recycle_chain(iter.into_chain());
                     }
                 } else {
-                    // ── Legacy linear sweep (--legacy-bulk / RIVAT3_LEGACY_BULK=1) ──
+                    // ── Linear sweep (production path, the historical bulk loop) ──
                     let target_end: usize = if lo < y {
                         n_all - b_ext
                     } else {

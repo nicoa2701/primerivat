@@ -6,7 +6,7 @@ static ALPHA_OVERRIDE: OnceLock<f64> = OnceLock::new();
 static BAND_MULT_OVERRIDE: OnceLock<usize> = OnceLock::new();
 static B_EXT_MULT_OVERRIDE: OnceLock<f64> = OnceLock::new();
 static NO_DEFERRED_TAIL_EXT: OnceLock<bool> = OnceLock::new();
-static LEGACY_BULK: OnceLock<bool> = OnceLock::new();
+static BUCKET_BULK: OnceLock<bool> = OnceLock::new();
 
 /// Pins the process-wide alpha value, bypassing hardware-adaptive selection.
 /// Only the first call takes effect; returns `Err` if already set.
@@ -77,20 +77,22 @@ pub fn no_deferred_tail_ext() -> bool {
         .unwrap_or(false)
 }
 
-/// Forces the legacy linear-sweep `rest_bulk_xoff` path in `s2_hard_sieve_par`,
-/// bypassing the bucket-sieve dispatch added in cible #1. Used by `--legacy-bulk`
-/// and `RIVAT3_LEGACY_BULK=1` for A/B benchmarking.
-pub fn set_legacy_bulk_override(enable: bool) -> Result<(), bool> {
-    LEGACY_BULK.set(enable)
+/// Enables the experimental bucket-sieve `rest_bulk_xoff` dispatch in
+/// `s2_hard_sieve_par`. Default is the linear sweep, which measured
+/// 1.93× faster than bucket on 9700X at 1e18 (cible #1 ruled out
+/// 2026-05-03; bucket kept opt-in for future experiments). Used by
+/// `--bucket-bulk` and `RIVAT3_BUCKET_BULK=1`.
+pub fn set_bucket_bulk_override(enable: bool) -> Result<(), bool> {
+    BUCKET_BULK.set(enable)
 }
 
-/// Returns true when the legacy linear `rest_bulk_xoff` path should be used.
-/// Defaults to false (= bucket-sieve path enabled).
-pub fn legacy_bulk() -> bool {
-    if let Some(&b) = LEGACY_BULK.get() {
+/// Returns true when the bucket-sieve `rest_bulk_xoff` path should be used.
+/// Defaults to false (= linear sweep, the production path).
+pub fn bucket_bulk() -> bool {
+    if let Some(&b) = BUCKET_BULK.get() {
         return b;
     }
-    std::env::var("RIVAT3_LEGACY_BULK")
+    std::env::var("RIVAT3_BUCKET_BULK")
         .ok()
         .map(|s| !s.is_empty() && s != "0" && s.to_lowercase() != "false")
         .unwrap_or(false)
