@@ -191,6 +191,7 @@ pub fn s2_hard_sieve_par(
     s2_primes: &crate::prime_bitset::PrimeBitset, // primes in (y, √x] for P2 = Σ(π(x/p) − (π(p)−1))
 ) -> (i128, u128, HardProfile) {
     use crate::factor_table::FactorTable;
+    use crate::bucket_sieve::{BucketChainIter, BucketSieve};
     use crate::segment::{advance_wheel_primes, count_primes_in_segment, MonoCount, WheelPrimeData, WheelSieve30, W30_IDX, W30_SEG, W30_WORDS, wheel30_next_k};
     use rayon::prelude::*;
     use std::time::Instant;
@@ -611,6 +612,12 @@ pub fn s2_hard_sieve_par(
         defer_enabled && use_log_scale && t < 2
     };
 
+    // Bucket-sieve dispatch for `rest_bulk_xoff` (cible #1). Default ON.
+    // `--legacy-bulk` / `RIVAT3_LEGACY_BULK=1` falls back to the linear sweep
+    // for A/B benchmarking and bit-exact comparison. Read once outside the
+    // par_iter so every band sees the same value.
+    let legacy_bulk = crate::parameters::legacy_bulk();
+
     // Per-band easy iterator init, hoisted out of the per-band closure so the
     // pass-2 deferred-tail-ext replay can reuse it for heavy bands. Captures
     // `n_hard, c, a, primes, x` from fn scope.  See pass-1 site below for
@@ -788,10 +795,49 @@ pub fn s2_hard_sieve_par(
             // wheel-30 multiple of `primes[c + b_ext + k]` that the cross-off
             // should land on; `bulk_next_j[k]` is the matching wheel index.
             // State is initialised lazily as `bulk_active_end` advances.
+            // Used by the legacy linear path; left untouched (and unused)
+            // when the bucket-sieve dispatch is active.
             let bulk_cap = n_all.saturating_sub(b_ext);
             let mut bulk_next_m: Vec<u64> = vec![0u64; bulk_cap];
             let mut bulk_next_j: Vec<u8>  = vec![0u8;  bulk_cap];
             let mut bulk_state_valid_end: usize = 0;
+
+            // Bucket-sieve dispatch for `rest_bulk_xoff`: when active (default),
+            // every bulk prime in `[b_ext, n_all)` is pre-distributed into the
+            // bucket of its first multiple ≥ band_lo. Each segment's loop
+            // drains its bucket chain, crosses off the multiples, and re-inserts
+            // each prime into the bucket of its next multiple. Primes whose
+            // next multiple lands beyond `band_hi` are silently dropped (the
+            // next band re-initialises from scratch).
+            //
+            // Allocate one extra slot for `band_hi` not snapped exactly to a
+            // W30_SEG multiple; cheap (8 B) vs. correctness risk.
+            let bucket_num_segs =
+                ((band_hi - band_lo) / W30_SEG as u64) as usize + 2;
+            let mut bucket_sieve: Option<BucketSieve> = if !legacy_bulk {
+                let mut bs = BucketSieve::new(bucket_num_segs);
+                for k in 0..bulk_cap {
+                    let p = primes[c + b_ext + k] as u64;
+                    // First wheel-30 multiple of p in [band_lo, ∞).
+                    let k0 = (band_lo + p - 1) / p;
+                    let k1 = wheel30_next_k(k0);
+                    let first_m = match k1.checked_mul(p) {
+                        Some(v) => v,
+                        None => continue,
+                    };
+                    if first_m > z { continue; }
+                    let target_seg = ((first_m - band_lo) / W30_SEG as u64) as usize;
+                    if target_seg >= bucket_num_segs { continue; }
+                    let target_seg_lo =
+                        band_lo + (target_seg as u64) * W30_SEG as u64;
+                    let mi = (first_m - target_seg_lo) as u32;
+                    let wi = W30_IDX[(k1 % 30) as usize] as u32;
+                    bs.insert(target_seg, p as u32, mi, wi);
+                }
+                Some(bs)
+            } else {
+                None
+            };
             // b_limit: max bi for which leaves are still possible (monotone ↓).
             let mut b_limit = b_ext;
             while b_limit > 0 && band_lo > leaf_cutoff_lo[b_limit - 1] {
@@ -915,43 +961,71 @@ pub fn s2_hard_sieve_par(
                 stats.rest_plain_ns += t_plain.elapsed().as_nanos() as u64;
 
                 let t_bulk = Instant::now();
-                // ── Bulk cross-off: bucket skips inactive primes (p² > hi) ──
-                let target_end: usize = if lo < y {
-                    n_all - b_ext
-                } else {
-                    while bulk_active_end < n_all {
-                        let p = primes[c + bulk_active_end] as u64;
-                        if p * p > hi { break; }
-                        bulk_active_end += 1;
+                if let Some(bs) = bucket_sieve.as_mut() {
+                    // ── Bulk cross-off via bucket sieve (cible #1) ──────────
+                    // Each prime in this segment's bucket chain has exactly
+                    // its next multiple located inside `[lo, hi)`. We drain
+                    // the chain, run the standard wheel-30 cross-off (which
+                    // handles 0-3 multiples per segment internally), then
+                    // re-insert the prime into its new target segment.
+                    let seg_id = ((lo - band_lo) / W30_SEG as u64) as usize;
+                    let chain = bs.take_segment(seg_id);
+                    if chain.is_some() {
+                        let mut iter = BucketChainIter::new(chain);
+                        while let Some(sp) = iter.next() {
+                            let p  = sp.prime() as u64;
+                            let mi = sp.multiple_index() as u64;
+                            let wi = sp.wheel_index() as u8;
+                            let pd = WheelPrimeData::new(p);
+                            let (new_m, new_j) =
+                                sieve.cross_off_pd_from_state(lo, p, &pd, lo + mi, wi);
+                            // Schedule next cross-off if it lands within this band.
+                            if new_m > z { continue; }
+                            let new_seg = ((new_m - band_lo) / W30_SEG as u64) as usize;
+                            if new_seg >= bucket_num_segs { continue; }
+                            let new_seg_lo =
+                                band_lo + (new_seg as u64) * W30_SEG as u64;
+                            let new_mi = (new_m - new_seg_lo) as u32;
+                            bs.insert(new_seg, p as u32, new_mi, new_j as u32);
+                        }
+                        bs.recycle_chain(iter.into_chain());
                     }
-                    bulk_active_end - b_ext
-                };
-                // Initialise persistent state for primes that just became
-                // active this segment (paid once per prime per band).
-                while bulk_state_valid_end < target_end {
-                    let k = bulk_state_valid_end;
-                    let p = primes[c + b_ext + k] as u64;
-                    let k0 = (lo + p - 1) / p;
-                    let k1 = wheel30_next_k(k0);
-                    bulk_next_m[k] = k1 * p;
-                    bulk_next_j[k] = W30_IDX[(k1 % 30) as usize];
-                    bulk_state_valid_end += 1;
-                }
-                // Cross-off with incremental state: no per-call 64-bit div.
-                // NB: `cross_off_pd_from_state_unrolled` (Phase 3) exists in
-                // segment.rs and is bit/state-exact, but switching to it
-                // here regressed `rest_bulk_xoff` by ~25 % at 1e15 α=1: the
-                // bulk primes do 0–3 cross-offs/seg on average, and the
-                // 8-way dispatch + byte-view + (m,j)-recovery overhead
-                // exceeds the per-iteration savings. Kept rolled here.
-                for k in 0..target_end {
-                    let p = primes[c + b_ext + k] as u64;
-                    let (nm, nj) = sieve.cross_off_pd_from_state(
-                        lo, p, &pb_data[b_ext + k],
-                        bulk_next_m[k], bulk_next_j[k],
-                    );
-                    bulk_next_m[k] = nm;
-                    bulk_next_j[k] = nj;
+                } else {
+                    // ── Legacy linear sweep (--legacy-bulk / RIVAT3_LEGACY_BULK=1) ──
+                    let target_end: usize = if lo < y {
+                        n_all - b_ext
+                    } else {
+                        while bulk_active_end < n_all {
+                            let p = primes[c + bulk_active_end] as u64;
+                            if p * p > hi { break; }
+                            bulk_active_end += 1;
+                        }
+                        bulk_active_end - b_ext
+                    };
+                    // Initialise persistent state for primes that just became
+                    // active this segment (paid once per prime per band).
+                    while bulk_state_valid_end < target_end {
+                        let k = bulk_state_valid_end;
+                        let p = primes[c + b_ext + k] as u64;
+                        let k0 = (lo + p - 1) / p;
+                        let k1 = wheel30_next_k(k0);
+                        bulk_next_m[k] = k1 * p;
+                        bulk_next_j[k] = W30_IDX[(k1 % 30) as usize];
+                        bulk_state_valid_end += 1;
+                    }
+                    // Cross-off with incremental state: no per-call 64-bit div.
+                    // NB: `cross_off_pd_from_state_unrolled` (Phase 3) exists in
+                    // segment.rs and is bit/state-exact, but switching to it
+                    // here regressed `rest_bulk_xoff` by ~25 % at 1e15 α=1.
+                    for k in 0..target_end {
+                        let p = primes[c + b_ext + k] as u64;
+                        let (nm, nj) = sieve.cross_off_pd_from_state(
+                            lo, p, &pb_data[b_ext + k],
+                            bulk_next_m[k], bulk_next_j[k],
+                        );
+                        bulk_next_m[k] = nm;
+                        bulk_next_j[k] = nj;
+                    }
                 }
                 stats.rest_bulk_ns += t_bulk.elapsed().as_nanos() as u64;
 

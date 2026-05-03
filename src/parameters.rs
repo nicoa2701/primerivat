@@ -6,6 +6,7 @@ static ALPHA_OVERRIDE: OnceLock<f64> = OnceLock::new();
 static BAND_MULT_OVERRIDE: OnceLock<usize> = OnceLock::new();
 static B_EXT_MULT_OVERRIDE: OnceLock<f64> = OnceLock::new();
 static NO_DEFERRED_TAIL_EXT: OnceLock<bool> = OnceLock::new();
+static LEGACY_BULK: OnceLock<bool> = OnceLock::new();
 
 /// Pins the process-wide alpha value, bypassing hardware-adaptive selection.
 /// Only the first call takes effect; returns `Err` if already set.
@@ -71,6 +72,25 @@ pub fn no_deferred_tail_ext() -> bool {
         return b;
     }
     std::env::var("RIVAT3_NO_DEFERRED_TAIL_EXT")
+        .ok()
+        .map(|s| !s.is_empty() && s != "0" && s.to_lowercase() != "false")
+        .unwrap_or(false)
+}
+
+/// Forces the legacy linear-sweep `rest_bulk_xoff` path in `s2_hard_sieve_par`,
+/// bypassing the bucket-sieve dispatch added in cible #1. Used by `--legacy-bulk`
+/// and `RIVAT3_LEGACY_BULK=1` for A/B benchmarking.
+pub fn set_legacy_bulk_override(enable: bool) -> Result<(), bool> {
+    LEGACY_BULK.set(enable)
+}
+
+/// Returns true when the legacy linear `rest_bulk_xoff` path should be used.
+/// Defaults to false (= bucket-sieve path enabled).
+pub fn legacy_bulk() -> bool {
+    if let Some(&b) = LEGACY_BULK.get() {
+        return b;
+    }
+    std::env::var("RIVAT3_LEGACY_BULK")
         .ok()
         .map(|s| !s.is_empty() && s != "0" && s.to_lowercase() != "false")
         .unwrap_or(false)
