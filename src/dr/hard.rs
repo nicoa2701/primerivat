@@ -665,11 +665,13 @@ pub fn s2_hard_sieve_par(
             let mut lo         = band_lo;
             let mut local_p2_offset: i64 = 0;
 
-            // Effective fold floor for this band: p2_band_inits[t] is at least
-            // `initial_p2_offset` (trivial), but for t > 0 we can prove a much
-            // tighter bound via the per-band Dusart lower bound (monotone ↑).
-            let band_fold_floor: i64 =
-                initial_p2_offset.max(p2_init_lb_per_band[t]);
+            // (Removed `band_fold_floor`: the Dusart-LB-based fold gate was a
+            // safety check made redundant by Piste 3 — every emitted ext-easy
+            // leaf already satisfies pi(n) ≥ b-1 by construction. Keeping the
+            // gate forced ~2.9 GB of `ext_stored` records at 1e18 α=2 because
+            // the LB on pi(band_lo) is too loose vs the actual π for low-n
+            // bands. See commit history for the prior wiring.)
+            let _ = (&initial_p2_offset, &p2_init_lb_per_band, t);
 
             // Bucket-sieve: only iterate active bulk primes (p² ≤ lo+W30_SEG).
             let mut bulk_active_end = {
@@ -933,27 +935,17 @@ pub fn s2_hard_sieve_par(
                                     + seed_in_query as i64;
                                 let b_m1 = (b as i64) - 1;
                                 // Piste 3 guarantees every emitted leaf satisfies
-                                // n ≥ p_{b-1} (clamps bulk-counted before sweep).
-                                // At band 0, band_fold_floor = p2_init[0] exactly,
-                                // so the fold check always succeeds. At bands t>0
-                                // a loose Dusart LB could theoretically force some
-                                // leaves into `ext_stored`, but in practice all
-                                // ext-easy leaves land in band 0 and this path is
-                                // never triggered.
-                                if v >= b_m1 - band_fold_floor {
-                                    ext_fold_partial +=
-                                        (v - (b_m1 - 1)) as i128; // V - (b-2)
-                                    ext_fold_count += 1;
-                                    stats.n_ext_emitted += 1;
-                                } else {
-                                    ext_stored.push(ExtEasyRec {
-                                        b_minus_2: (b as i32) - 2,
-                                        raw,
-                                        seed_in_query,
-                                        adj_lo,
-                                        local_p2: local_p2_offset,
-                                    });
-                                }
+                                // n ≥ p_{b-1}, hence pi(n) ≥ b-1 and the closed
+                                // form φ(n, b-1) = pi(n) - (b-2) is ≥ 1 with no
+                                // clamp needed. Fold unconditionally; the prior
+                                // `band_fold_floor` test was a redundant check
+                                // that the (loose) Dusart LB on pi(band_lo)
+                                // sufficed to prove pi_n ≥ b-1, which Piste 3
+                                // already guarantees algorithmically.
+                                ext_fold_partial +=
+                                    (v - (b_m1 - 1)) as i128; // V - (b-2)
+                                ext_fold_count += 1;
+                                stats.n_ext_emitted += 1;
                             }
                             if pl_idx <= b {
                                 easy_ptrs[ei] = a;
@@ -1050,7 +1042,7 @@ pub fn s2_hard_sieve_par(
                         let pb = primes[b - 1];
                         let mut local_fp: i128 = 0;
                         let mut local_fc: i64  = 0;
-                        let mut local_st: Vec<ExtEasyRec> = Vec::new();
+                        let local_st: Vec<ExtEasyRec> = Vec::new();
                         let mut local_ne: u64 = 0;
 
                         for seg in deferred.iter() {
@@ -1074,19 +1066,12 @@ pub fn s2_hard_sieve_par(
                                         - seg.adj_lo as i64
                                         + seed_in_query as i64;
                                     let b_m1 = (b as i64) - 1;
-                                    if v >= b_m1 - band_fold_floor {
-                                        local_fp += (v - (b_m1 - 1)) as i128;
-                                        local_fc += 1;
-                                        local_ne += 1;
-                                    } else {
-                                        local_st.push(ExtEasyRec {
-                                            b_minus_2: (b as i32) - 2,
-                                            raw,
-                                            seed_in_query,
-                                            adj_lo: seg.adj_lo,
-                                            local_p2: seg.local_p2_offset,
-                                        });
-                                    }
+                                    // See pass-1 site: Piste 3 guarantees
+                                    // pi_n ≥ b-1, so the closed form
+                                    // pi_n - (b-2) is ≥ 1 with no clamp.
+                                    local_fp += (v - (b_m1 - 1)) as i128;
+                                    local_fc += 1;
+                                    local_ne += 1;
                                 }
                                 if pl_idx <= b {
                                     pl_idx = a;
