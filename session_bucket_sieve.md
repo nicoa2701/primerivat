@@ -1,5 +1,29 @@
 # Session dédiée — bucket sieve pour `rest_bulk_xoff`
 
+> **VERDICT (post-session, 2026-05-03)** : **❌ Levier invalidé sur 9700X.**
+> Mesure 9700X 1e18 α=2 auto : bucket = **94.8 s** vs linear = **49.1 s**
+> → bucket **1.93× plus lent** globalement, **3.83× plus lent** sur
+> `rest_bulk_xoff` seul (686.9 s CPU vs 179.4 s). Cause : le linear sweep
+> parcourt `pb_data` séquentiellement, le prefetcher matériel L1/L2 absorbe
+> le coût d'accès malgré `pb_data` (~70 Mo) > L3 (32 Mo). Le bucket remplace
+> ce hit prefetché par un recompute `WheelPrimeData::new(p)` (~250 cycles)
+> + l'overhead bucket — plus cher que le miss DRAM qu'il évite.
+>
+> **État du code** : module `bucket_sieve.rs` (commit `02809f5`) + dispatch
+> `s2_hard_sieve_par` (commit `95347eb`) conservés derrière `--bucket-bulk`
+> opt-in (commit `9aae1f3`). Default = linear sweep (production path).
+>
+> **Pour la prochaine session**, voir la roadmap mise à jour dans
+> `project_long_term_goal_close_primecount_gap.md`. Leviers vivants :
+> multi-template AND pre-sieve, `fast_div64`, `pb_data` packing,
+> `LoadBalancerS2` dynamique (imbalance 18× mesuré ici), AVX-512 popcount.
+>
+> Le contenu ci-dessous est le plan ORIGINAL de la session — conservé
+> comme post-mortem (montre l'hypothèse de départ et pourquoi elle n'a
+> pas tenu en pratique).
+
+---
+
 > **But de la session** : porter le bucket sieve de primesieve (`EratBig`)
 > dans `s2_hard_sieve_par` pour faire chuter `rest_bulk_xoff` (50 % du
 > CPU à 1e18, et qui grossit avec x). Cible : −25 à −33 % wall global
