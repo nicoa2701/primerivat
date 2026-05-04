@@ -473,52 +473,6 @@ pub fn s2_hard_sieve_par(
         phi_vec
     };
 
-    // ── Phi recompute helper (used by Phase 2 sub-chunks at resolve time) ───
-    // Returns phi_vec[bi] = phi(lo, primes[c+bi]) for bi in 0..b_ext, computed
-    // from scratch via a small wheel-30 sieve from 1 to lo. Replays the same
-    // logic as the `initial_phi_vec` block above, parametrised on an arbitrary
-    // `lo`. Cost (Phase 0 measured on 9700X 1e18 α=2): ~0.8 ms at lo = 524k,
-    // ~2.5 ms at lo = 1.6M; scales linearly in lo.
-    let compute_phi_init_at = |lo: u64| -> Vec<i64> {
-        let mut phi_vec = vec![0i64; b_ext];
-        if lo == 0 || b_ext == 0 {
-            return phi_vec;
-        }
-        let n_init  = lo as usize;
-        let n_words = (n_init + 63) / 64;
-        let mut bits: Vec<u64> = vec![!0u64; n_words];
-        bits[0] &= !1u64;
-        let overhang = n_init % 64;
-        if overhang != 0 {
-            bits[n_words - 1] &= (1u64 << overhang) - 1;
-        }
-        for k in 0..c {
-            let p = primes[k] as usize;
-            let mut m = p;
-            while m < n_init {
-                bits[m / 64] &= !(1u64 << (m % 64));
-                m += p;
-            }
-        }
-        let mut count: i64 = bits.iter().map(|w| w.count_ones() as i64).sum();
-        phi_vec[0] = count;
-        for bi in 0..(b_ext - 1) {
-            let pk = primes[c + bi] as usize;
-            let mut m = pk;
-            while m < n_init {
-                let w = m / 64;
-                let mask = 1u64 << (m % 64);
-                if bits[w] & mask != 0 {
-                    bits[w] &= !mask;
-                    count -= 1;
-                }
-                m += pk;
-            }
-            phi_vec[bi + 1] = count;
-        }
-        phi_vec
-    };
-
     // ── P2 setup ─────────────────────────────────────────────────────────────
     // π(lo_start − 1) = seed primes strictly below lo_start (s2_primes > y ≥ lo_start).
     let initial_p2_offset: i64 = primes.partition_point(|&p| p < lo_start) as i64;
@@ -1206,6 +1160,7 @@ pub fn s2_hard_sieve_par(
                             stats.n_prefix_fills += 1;
                             p2_prefix_ready = true;
                         }
+                        let mut seed_cursor = seed_below_lo;
                         let bi = n_hard + ei;
                         let b  = bi + c + 1;
                         let pb = primes[b - 1];
@@ -1217,8 +1172,10 @@ pub fn s2_hard_sieve_par(
                             if n >= lo {
                                 let raw = sieve.count_primes_upto_int(&p2_prefix, n, lo);
                                 let seed_in_query: i32 = if lo < y {
-                                    let j2 = primes.partition_point(|&p| p <= n);
-                                    (j2 - seed_below_lo) as i32
+                                    while seed_cursor < primes.len() && primes[seed_cursor] <= n {
+                                        seed_cursor += 1;
+                                    }
+                                    (seed_cursor - seed_below_lo) as i32
                                 } else { 0 };
                                 let v = local_p2_offset
                                     + raw as i64
@@ -1255,12 +1212,14 @@ pub fn s2_hard_sieve_par(
                 if !p2_walker.is_done() && p2_walker.rank() >= p2_min_rank {
                     let q_check = (x / p2_walker.p() as u128) as u64;
                     if q_check >= lo && q_check < hi {
+                        let mut seed_cursor = seed_below_lo;
                         if !p2_prefix_ready {
                             let t_pref = Instant::now();
                             sieve.fill_prefix_counts(&mut p2_prefix);
                             seed_below_lo = if lo < y {
                                 primes.partition_point(|&p| p < lo)
                             } else { 0 };
+                            seed_cursor = seed_below_lo;
                             stats.tail_prefix_ns +=
                                 t_pref.elapsed().as_nanos() as u64;
                             stats.n_prefix_fills += 1;
@@ -1276,8 +1235,10 @@ pub fn s2_hard_sieve_par(
                             if q_k < lo  { p2_walker.advance(); continue; }
                             let raw = sieve.count_primes_upto_int(&p2_prefix, q_k, lo);
                             let seed_in_query: i32 = if lo < y {
-                                let j2 = primes.partition_point(|&p_inner| p_inner <= q_k);
-                                (j2 - seed_below_lo) as i32
+                                while seed_cursor < primes.len() && primes[seed_cursor] <= q_k {
+                                    seed_cursor += 1;
+                                }
+                                (seed_cursor - seed_below_lo) as i32
                             } else { 0 };
                             // Fold P2: pi_qk = p2_init[t] + V, V = local_p2
                             // + raw - adj_lo + seed_in_query; k = a + j.
@@ -1332,6 +1293,9 @@ pub fn s2_hard_sieve_par(
                         let mut local_fp: i128 = 0;
                         let mut local_fc: i64  = 0;
                         let mut local_ne: u64 = 0;
+                        let mut seed_cursor = if band_lo < y {
+                            primes.partition_point(|&p| p < band_lo)
+                        } else { 0 };
 
                         for seg in deferred.iter() {
                             if pl_idx >= a { break; }
@@ -1346,8 +1310,10 @@ pub fn s2_hard_sieve_par(
                                     let raw = count_primes_in_segment(
                                         &seg.bits, &seg.p2_prefix, n, lo_seg);
                                     let seed_in_query: i32 = if lo_seg < y {
-                                        let j2 = primes.partition_point(|&p| p <= n);
-                                        (j2 - seg.seed_below_lo) as i32
+                                        while seed_cursor < primes.len() && primes[seed_cursor] <= n {
+                                            seed_cursor += 1;
+                                        }
+                                        (seed_cursor - seg.seed_below_lo) as i32
                                     } else { 0 };
                                     let v = seg.local_p2_offset
                                         + raw as i64
@@ -1406,9 +1372,9 @@ pub fn s2_hard_sieve_par(
     // Phase 2: optional sub-band chunking of the heaviest ext_easy bands,
     // gated by `RIVAT3_SUBDIVIDE_HEAVY` (number of bands) and
     // `RIVAT3_HEAVY_CHUNKS` (chunks per band). Default off (= Phase 1).
-    // Subdivided bands get K work units each [chunk_lo, chunk_hi); the
-    // resolve pass recomputes `phi_init` from scratch at chunk_lo for every
-    // sub-chunk via `compute_phi_init_at` (cost ~2 ms per chunk at 1e18 α=2).
+    // Subdivided bands get K work units each [chunk_lo, chunk_hi). The resolve
+    // pass scans sub-chunk deltas in chunk_lo order to seed each chunk from the
+    // previous one, so no large from-scratch phi recompute is needed.
     //
     // Opt-out via `RIVAT3_NO_WORKPOOL=1` (reverts to original par_iter).
     // ext_easy_weight: heavier ↦ band whose `tail_ext_easy_emit` is expected
@@ -1737,40 +1703,22 @@ pub fn s2_hard_sieve_par(
     ck!("before resolution pass");
 
     // Resolution pass: per chunk, combine local accumulators with the
-    // appropriate (phi_init, p2_init) reference. For whole-band chunks
-    // (chunk_lo == band_lo[t]), the prefix-sum'd phi_band_inits[t] and
-    // p2_band_inits[t] are the correct reference. For sub-chunks
-    // (chunk_lo > band_lo[t]), recompute phi_init from scratch at chunk_lo
-    // via `compute_phi_init_at` and p2_init via `partition_point` on `primes`
-    // — cost ~1-3 ms per sub-chunk, negligible vs sub-chunk's sweep wall.
+    // appropriate (phi_init, p2_init) reference. For subdivided bands we avoid
+    // recomputing phi_init from scratch at chunk_lo; instead, once the band's
+    // global init is known, chunks are scanned in chunk_lo order and each
+    // chunk's delta seeds the next chunk. This preserves the existing band
+    // prefix invariant while making rest_bulk sub-chunks autonomous during
+    // their parallel sweep.
     let t_resolve = Instant::now();
     let resolved: Vec<(i128, u128)> = (0..num_bands)
         .into_par_iter()
         .map(|t| {
             let chunks = &chunks_per_band[t];
-            let band_lo = band_bounds[t];
             let mut total_sum: i128 = 0;
             let mut total_p2: u128 = 0;
-            for (chunk_lo, sw) in chunks {
-                let (phi_init_owned, p2_init): (Vec<i64>, i64) = if *chunk_lo == band_lo {
-                    (phi_band_inits[t].clone(), p2_band_inits[t])
-                } else {
-                    let phi = compute_phi_init_at(*chunk_lo);
-                    // p2_init = π(chunk_lo - 1) = count of primes strictly below
-                    // chunk_lo. Primes ≤ y live in the `primes` Vec; primes in
-                    // (y, z] live in `s2_primes`. For chunk_lo ≤ y the bitset
-                    // contributes 0; for chunk_lo > y we add the bitset count
-                    // up to chunk_lo - 1. (Phase 2 ext_easy sub-chunks always
-                    // have chunk_lo ≤ y, so this only matters for Phase 3
-                    // rest_bulk sub-chunks where chunk_lo can exceed y.)
-                    let seed_count = primes.partition_point(|&p| p < *chunk_lo) as i64;
-                    let bitset_count = if *chunk_lo > 0 {
-                        s2_primes.count_le(*chunk_lo - 1) as i64
-                    } else { 0 };
-                    let p2 = seed_count + bitset_count;
-                    (phi, p2)
-                };
-                let phi_init: &[i64] = &phi_init_owned;
+            let mut phi_init = phi_band_inits[t].clone();
+            let mut p2_init = p2_band_inits[t];
+            for (_, sw) in chunks {
                 let leaf_partial      = sw.2;
                 let bi_contrib        = &sw.3;
                 let p2_partial        = sw.4;
@@ -1789,6 +1737,10 @@ pub fn s2_hard_sieve_par(
                 if p2_sum_i > 0 {
                     total_p2 += p2_sum_i as u128;
                 }
+                for bi in 0..b_ext {
+                    phi_init[bi] += sw.0[bi];
+                }
+                p2_init += sw.1;
             }
             (total_sum, total_p2)
         })
