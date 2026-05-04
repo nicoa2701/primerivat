@@ -122,6 +122,7 @@ pub struct WorkItemProfile {
     pub band_t: usize,
     pub chunk_lo: u64,
     pub chunk_hi: u64,
+    pub wall_ns: u64,
     pub fill_ns: u64,
     pub bi_main_ns: u64,
     pub bi_main_leaf_ns: u64,
@@ -1771,15 +1772,15 @@ pub fn s2_hard_sieve_par(
 
     ck!("before par_iter (work_items)");
 
-    // chunk_outputs: (band_id, chunk_lo, sweep), one per work item, in
+    // chunk_outputs: (band_id, chunk_lo, wall_ns, sweep), one per work item, in
     // work_items order (NOT processing order).
-    let compute_chunk_outputs = || -> Vec<(usize, u64, BandSweep)> {
+    let compute_chunk_outputs = || -> Vec<(usize, u64, u64, BandSweep)> {
         if !crate::parameters::no_workpool() {
         use std::sync::Mutex;
         use std::sync::atomic::{AtomicUsize, Ordering};
 
         let cursor = AtomicUsize::new(0);
-        let results: Vec<Mutex<Option<BandSweep>>> =
+        let results: Vec<Mutex<Option<(u64, BandSweep)>>> =
             (0..n_items).map(|_| Mutex::new(None)).collect();
         let n_workers = rayon::current_num_threads().max(1);
 
@@ -1795,8 +1796,10 @@ pub fn s2_hard_sieve_par(
                         let i = cursor.fetch_add(1, Ordering::Relaxed);
                         if i >= n_items { break; }
                         let item_idx = item_order[i];
+                        let t_item = Instant::now();
                         let r = process_item(&work_items[item_idx]);
-                        *results[item_idx].lock().unwrap() = Some(r);
+                        let wall_ns = t_item.elapsed().as_nanos() as u64;
+                        *results[item_idx].lock().unwrap() = Some((wall_ns, r));
                     }
                 });
             }
@@ -1804,16 +1807,18 @@ pub fn s2_hard_sieve_par(
 
         results.into_iter().enumerate()
             .map(|(i, m)| {
-                let sw = m.into_inner().unwrap()
+                let (wall_ns, sw) = m.into_inner().unwrap()
                     .expect("workpool: every item slot must be filled exactly once");
-                (work_items[i].band_id, work_items[i].chunk_lo, sw)
+                (work_items[i].band_id, work_items[i].chunk_lo, wall_ns, sw)
             })
             .collect()
         } else {
             (0..n_items).into_par_iter()
                 .map(|i| {
+                    let t_item = Instant::now();
                     let sw = process_item(&work_items[i]);
-                    (work_items[i].band_id, work_items[i].chunk_lo, sw)
+                    let wall_ns = t_item.elapsed().as_nanos() as u64;
+                    (work_items[i].band_id, work_items[i].chunk_lo, wall_ns, sw)
                 })
                 .collect()
         }
@@ -1871,7 +1876,7 @@ pub fn s2_hard_sieve_par(
 
         let t_split = Instant::now();
         let cursor = AtomicUsize::new(0);
-        let sweep_results: Vec<Mutex<Option<BandSweep>>> =
+        let sweep_results: Vec<Mutex<Option<(u64, BandSweep)>>> =
             (0..n_items).map(|_| Mutex::new(None)).collect();
         let tail_results: Vec<Mutex<Option<i128>>> =
             (0..tail_items.len()).map(|_| Mutex::new(None)).collect();
@@ -1894,8 +1899,10 @@ pub fn s2_hard_sieve_par(
                         if i >= mixed_order.len() { break; }
                         match mixed_items[mixed_order[i]] {
                             MixedItem::Sweep(item_idx) => {
+                                let t_item = Instant::now();
                                 let r = process_item(&work_items[item_idx]);
-                                *sweep_results[item_idx].lock().unwrap() = Some(r);
+                                let wall_ns = t_item.elapsed().as_nanos() as u64;
+                                *sweep_results[item_idx].lock().unwrap() = Some((wall_ns, r));
                             }
                             MixedItem::Tail(tail_idx) => {
                                 let item = tail_items[tail_idx];
@@ -1908,11 +1915,11 @@ pub fn s2_hard_sieve_par(
             }
         });
 
-        let chunk_outputs: Vec<(usize, u64, BandSweep)> = sweep_results.into_iter().enumerate()
+        let chunk_outputs: Vec<(usize, u64, u64, BandSweep)> = sweep_results.into_iter().enumerate()
             .map(|(i, m)| {
-                let sw = m.into_inner().unwrap()
+                let (wall_ns, sw) = m.into_inner().unwrap()
                     .expect("mixed workpool: every sweep slot must be filled exactly once");
-                (work_items[i].band_id, work_items[i].chunk_lo, sw)
+                (work_items[i].band_id, work_items[i].chunk_lo, wall_ns, sw)
             })
             .collect();
         let split_ext: i128 = tail_results.into_iter()
@@ -1935,13 +1942,14 @@ pub fn s2_hard_sieve_par(
 
     let work_item_profiles: Vec<WorkItemProfile> = if work_item_profile {
         chunk_outputs.iter().enumerate()
-            .map(|(i, (band_id, chunk_lo, sw))| {
+            .map(|(i, (band_id, chunk_lo, wall_ns, sw))| {
                 let s = &sw.8;
                 WorkItemProfile {
                     item_i: i,
                     band_t: *band_id,
                     chunk_lo: *chunk_lo,
                     chunk_hi: work_items[i].chunk_hi,
+                    wall_ns: *wall_ns,
                     fill_ns: s.fill_ns,
                     bi_main_ns: s.bi_main_ns,
                     bi_main_leaf_ns: s.bi_main_leaf_ns,
@@ -1964,7 +1972,7 @@ pub fn s2_hard_sieve_par(
 
     // Group chunks per band and sort each band's chunks by chunk_lo asc.
     let mut chunks_per_band: Vec<Vec<(u64, BandSweep)>> = (0..num_bands).map(|_| Vec::new()).collect();
-    for (band_id, chunk_lo, sweep) in chunk_outputs {
+    for (band_id, chunk_lo, _, sweep) in chunk_outputs {
         chunks_per_band[band_id].push((chunk_lo, sweep));
     }
     for v in chunks_per_band.iter_mut() {

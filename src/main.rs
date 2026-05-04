@@ -474,7 +474,7 @@ fn run_dr_meissel4_profile(x: u128, _threads: usize) {
     }
 
     if !profile.work_items.is_empty() {
-        let mut items: Vec<(usize, usize, u64, u64, u64, u64, u64, u64)> = profile
+        let mut items: Vec<(usize, usize, u64, u64, u64, u64, u64, u64, u64)> = profile
             .work_items
             .iter()
             .map(|w| {
@@ -485,6 +485,7 @@ fn run_dr_meissel4_profile(x: u128, _threads: usize) {
                     w.band_t,
                     w.chunk_lo,
                     w.chunk_hi,
+                    w.wall_ns,
                     total,
                     w.tail_ext_ns,
                     w.rest_bulk_ns,
@@ -492,17 +493,18 @@ fn run_dr_meissel4_profile(x: u128, _threads: usize) {
                 )
             })
             .collect();
-        items.sort_by(|a, b| b.4.cmp(&a.4));
+        items.sort_by(|a, b| b.5.cmp(&a.5));
         let show = items.len().min(12);
         println!("    ┌─ Work-item breakdown (top {} of {} by total CPU) ─", show, items.len());
-        println!("    │  {:>4}  {:>3}  {:>13} → {:<13}  {:>9}  {:>9}  {:>9}  {:>11}",
-                 "item", "t", "lo", "hi", "total ms", "tail_ext", "rest_bulk", "ext_emit");
-        for &(item, t, lo, hi, total, tail_ext, rest_bulk, ext_emit) in items.iter().take(show) {
-            println!("    │  {:>4}  {:>3}  {:>13} → {:<13}  {:>9.1}  {:>9.1}  {:>9.1}  {:>11}",
+        println!("    │  {:>4}  {:>3}  {:>13} → {:<13}  {:>8}  {:>9}  {:>9}  {:>9}  {:>11}",
+                 "item", "t", "lo", "hi", "wall ms", "total ms", "tail_ext", "rest_bulk", "ext_emit");
+        for &(item, t, lo, hi, wall, total, tail_ext, rest_bulk, ext_emit) in items.iter().take(show) {
+            println!("    │  {:>4}  {:>3}  {:>13} → {:<13}  {:>8.1}  {:>9.1}  {:>9.1}  {:>9.1}  {:>11}",
                 item,
                 t,
                 fmt_thousands(lo as u128),
                 fmt_thousands(hi as u128),
+                (wall as f64) / 1e6,
                 (total as f64) / 1e6,
                 (tail_ext as f64) / 1e6,
                 (rest_bulk as f64) / 1e6,
