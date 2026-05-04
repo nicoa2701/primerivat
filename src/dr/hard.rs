@@ -34,6 +34,9 @@ pub struct HardProfile {
     pub tail_prefix_build_ns: u64,
     /// Ext-easy leaf emission loop.
     pub tail_ext_emit_ns: u64,
+    /// Ext-easy contribution resolved from the in-sieve path (including clamp
+    /// leaves). Used by opt-in split-tail probes.
+    pub tail_ext_contribution: i128,
     /// P2 query emission loop.
     pub tail_p2_emit_ns: u64,
     /// `final_count` + `seed_in_seg` bsearch + `advance_wheel_primes`.
@@ -1822,12 +1825,13 @@ pub fn s2_hard_sieve_par(
     // prefix invariant while making rest_bulk sub-chunks autonomous during
     // their parallel sweep.
     let t_resolve = Instant::now();
-    let resolved: Vec<(i128, u128)> = (0..num_bands)
+    let resolved: Vec<(i128, u128, i128)> = (0..num_bands)
         .into_par_iter()
         .map(|t| {
             let chunks = &chunks_per_band[t];
             let mut total_sum: i128 = 0;
             let mut total_p2: u128 = 0;
+            let mut total_ext: i128 = 0;
             let mut phi_init = phi_band_inits[t].clone();
             let mut p2_init = p2_band_inits[t];
             for (_, sw) in chunks {
@@ -1842,7 +1846,10 @@ pub fn s2_hard_sieve_par(
                 for bi in 0..bi_contrib.len() {
                     sum += (bi_contrib[bi] as i128) * (phi_init[bi] as i128);
                 }
-                sum += (p2_init as i128) * (ext_fold_count as i128) + ext_fold_partial;
+                let ext_sum =
+                    (p2_init as i128) * (ext_fold_count as i128) + ext_fold_partial;
+                sum += ext_sum;
+                total_ext += ext_sum;
                 total_sum += sum;
                 let p2_sum_i: i128 =
                     (p2_init as i128) * (p2_q_count as i128) + p2_partial;
@@ -1854,16 +1861,65 @@ pub fn s2_hard_sieve_par(
                 }
                 p2_init += sw.1;
             }
-            (total_sum, total_p2)
+            (total_sum, total_p2, total_ext)
         })
         .collect();
     let ns_resolve = t_resolve.elapsed().as_nanos() as u64;
 
     // s2_total = per-band folded sums + bulk clamp count (+1 each).
     let s2_total: i128 =
-        resolved.iter().map(|&(s, _)| s).sum::<i128>()
+        resolved.iter().map(|&(s, _, _)| s).sum::<i128>()
         + total_clamp_count as i128;
-    let p2_total: u128 = resolved.iter().map(|&(_, p)| p).sum();
+    let p2_total: u128 = resolved.iter().map(|&(_, p, _)| p).sum();
+    let tail_ext_contribution: i128 =
+        resolved.iter().map(|&(_, _, e)| e).sum::<i128>()
+        + total_clamp_count as i128;
+
+    if std::env::var("RIVAT3_TAIL_EXT_SPLIT_CHECK").is_ok() {
+        let t_split = Instant::now();
+        let split_ext: i128 = (far_easy_start..n_easy)
+            .into_par_iter()
+            .map(|ei| {
+                let bi = n_hard + ei;
+                let b = bi + c + 1;
+                if b >= a || b < 2 {
+                    return 0i128;
+                }
+                let pb = primes[b - 1] as u128;
+                let pbm1 = primes[b - 2] as u128;
+                let pl_clamp_threshold = (x / (pb * pbm1)) as u64;
+                let nonclamp_cnt = primes[b..a]
+                    .partition_point(|&p| p <= pl_clamp_threshold);
+                let upper_cnt = if lo_start == 0 {
+                    a - b
+                } else {
+                    let pl_upper = (x / (pb * lo_start as u128)) as u64;
+                    primes[b..a].partition_point(|&p| p <= pl_upper)
+                };
+                let clamped = upper_cnt.saturating_sub(nonclamp_cnt) as i128;
+                let emit_cnt = nonclamp_cnt.min(upper_cnt);
+                let mut sum = clamped;
+                let b_minus_2 = (b as i128) - 2;
+                for &pl in &primes[b..b + emit_cnt] {
+                    let n = (x / (pb * pl as u128)) as u64;
+                    let pi_n = if n <= y {
+                        primes.partition_point(|&p| p <= n)
+                    } else {
+                        a + s2_primes.count_le(n)
+                    } as i128;
+                    sum += pi_n - b_minus_2;
+                }
+                sum
+            })
+            .sum();
+        eprintln!(
+            "[tail-ext-split-check] fused={} split={} elapsed={:.3}s",
+            tail_ext_contribution,
+            split_ext,
+            t_split.elapsed().as_secs_f64(),
+        );
+        assert_eq!(split_ext, tail_ext_contribution, "tail_ext split mismatch");
+    }
 
     let profile = HardProfile {
         sweep_fill_ns:             agg.fill_ns,
@@ -1885,6 +1941,7 @@ pub fn s2_hard_sieve_par(
         },
         tail_prefix_build_ns:      agg.tail_prefix_ns,
         tail_ext_emit_ns:          agg.tail_ext_ns,
+        tail_ext_contribution,
         tail_p2_emit_ns:           agg.tail_p2_ns,
         tail_advance_ns:           agg.tail_advance_ns,
         resolve_ns:                ns_resolve,
