@@ -637,18 +637,17 @@ pub fn s2_hard_sieve_par(
         bulk_bin_calls: [u64; REST_BULK_BINS],
     }
 
-    // Heavy-band selection for the 2-pass deferred-tail-ext path. Default
-    // keeps the historical mask (bands 0 + 1) when the log-scale layout is
-    // active (= α=2 clamp regime). `RIVAT3_DEFERRED_TAIL_EXT_BANDS=4` extends
-    // this to bands 0..3, useful for the single-segment tail_ext hot spots
-    // exposed by `RIVAT3_WORK_ITEM_PROFILE=1` at 1e18 on 9700X. Outside α=2,
+    // Heavy-band selection for the 2-pass deferred-tail-ext path. Default 4
+    // matches the best 9700X 1e18 profile from 2026-05-04 and covers bands
+    // 0..3, useful for the single-segment tail_ext hot spots exposed by
+    // `RIVAT3_WORK_ITEM_PROFILE=1`. Outside α=2,
     // `use_log_scale = false` so the mask is empty and pass 2 is a no-op.
     // Disabled entirely via `--no-deferred-tail-ext`.
     let defer_enabled = !crate::parameters::no_deferred_tail_ext();
     let deferred_tail_ext_bands = std::env::var("RIVAT3_DEFERRED_TAIL_EXT_BANDS")
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or(2);
+        .unwrap_or(4);
     let is_heavy = |t: usize| -> bool {
         defer_enabled && use_log_scale && t < deferred_tail_ext_bands
     };

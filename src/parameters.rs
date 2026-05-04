@@ -148,12 +148,13 @@ pub fn no_workpool() -> bool {
 
 /// Phase-2 sub-band chunking switches.
 ///
-/// `subdivide_heavy()`: number of heaviest ext_easy bands to subdivide
-/// (default 0 = no subdivision = Phase 1 behaviour). Set to 3 to subdivide
-/// the top-3 ext_easy bands (1, 2, 3 at 1e18 α=2 — the canonical hot-spot).
+/// `subdivide_heavy()`: number of heaviest ext_easy bands to subdivide.
+/// Default 3 matches the best 9700X 1e18 profile from 2026-05-04; set to 0
+/// to recover the pre-tuning Phase 1 behaviour.
 ///
-/// `heavy_chunks()`: number of sub-chunks per heavy band (default 1 = no
-/// subdivision). Total work units = num_bands + n_heavy * (heavy_chunks - 1).
+/// `heavy_chunks()`: number of sub-chunks per heavy band. Default 4 matches
+/// the best 9700X 1e18 profile from 2026-05-04. Total work units =
+/// num_bands + n_heavy * (heavy_chunks - 1).
 ///
 /// Setting either to its default neutralises Phase 2 (1 chunk per band,
 /// equivalent to the Phase 1 work-pool).
@@ -172,7 +173,7 @@ pub fn subdivide_heavy() -> usize {
     std::env::var("RIVAT3_SUBDIVIDE_HEAVY")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(0)
+        .unwrap_or(3)
 }
 
 pub fn set_heavy_chunks_override(n: usize) -> Result<(), usize> {
@@ -186,7 +187,7 @@ pub fn heavy_chunks() -> usize {
     std::env::var("RIVAT3_HEAVY_CHUNKS")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(1)
+        .unwrap_or(4)
         .max(1)
 }
 
@@ -210,10 +211,9 @@ pub fn tiny_c() -> usize {
 
 /// Phase-3 sub-band chunking for rest_bulk heavy bands (high-blo, span-dominated).
 ///
-/// `subdivide_rest_bulk()`: number of heaviest rest_bulk bands to subdivide
-/// (default 0 = no subdivision). Set to 8 to subdivide the 8 widest bands
-/// near z (bands 248-255 at 1e18 α=2 — the rest_bulk hot-spot, ~22 s solo
-/// each, dominating wall after Phase 2 cracked the ext_easy bottleneck).
+/// `subdivide_rest_bulk()`: number of heaviest rest_bulk bands to subdivide.
+/// Default 20 matches the best 9700X 1e18 profile from 2026-05-04; set to 0
+/// to disable rest_bulk subdivision.
 ///
 /// Shares `heavy_chunks()` with Phase 2: each subdivided rest_bulk band gets
 /// the same K sub-chunks. At 1e18 α=2 / 9700X, K=4 yields ~5.5 s per
@@ -230,7 +230,7 @@ pub fn subdivide_rest_bulk() -> usize {
     std::env::var("RIVAT3_SUBDIVIDE_REST_BULK")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(0)
+        .unwrap_or(20)
 }
 
 /// Hardware-adaptive alpha selector for the DR algorithm.
