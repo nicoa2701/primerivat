@@ -1683,8 +1683,20 @@ pub fn s2_hard_sieve_par(
         cost.min(u64::MAX as u128) as u64
     };
 
+    let deferred_tail_ext_late = std::env::var("RIVAT3_DEFERRED_TAIL_EXT_ORDER")
+        .ok()
+        .map(|s| s.eq_ignore_ascii_case("late"))
+        .unwrap_or(false);
+    let scheduler_cost = |item: &WorkItem| -> u64 {
+        if deferred_tail_ext_late && item.is_heavy {
+            0
+        } else {
+            predicted_cost(item)
+        }
+    };
+
     let mut item_order: Vec<usize> = (0..n_items).collect();
-    item_order.sort_by(|&a, &b| predicted_cost(&work_items[b]).cmp(&predicted_cost(&work_items[a])));
+    item_order.sort_by(|&a, &b| scheduler_cost(&work_items[b]).cmp(&scheduler_cost(&work_items[a])));
 
     let process_item = |item: &WorkItem| -> BandSweep {
         process_band(
