@@ -7,6 +7,11 @@ static BAND_MULT_OVERRIDE: OnceLock<usize> = OnceLock::new();
 static B_EXT_MULT_OVERRIDE: OnceLock<f64> = OnceLock::new();
 static NO_DEFERRED_TAIL_EXT: OnceLock<bool> = OnceLock::new();
 static BUCKET_BULK: OnceLock<bool> = OnceLock::new();
+static PHI_INIT_PROBE: OnceLock<bool> = OnceLock::new();
+static NO_WORKPOOL: OnceLock<bool> = OnceLock::new();
+static SUBDIVIDE_HEAVY: OnceLock<usize> = OnceLock::new();
+static SUBDIVIDE_REST_BULK: OnceLock<usize> = OnceLock::new();
+static HEAVY_CHUNKS: OnceLock<usize> = OnceLock::new();
 
 /// Pins the process-wide alpha value, bypassing hardware-adaptive selection.
 /// Only the first call takes effect; returns `Err` if already set.
@@ -96,6 +101,117 @@ pub fn bucket_bulk() -> bool {
         .ok()
         .map(|s| !s.is_empty() && s != "0" && s.to_lowercase() != "false")
         .unwrap_or(false)
+}
+
+/// Phase-0 instrumentation switch (Design B sub-band chunking feasibility).
+/// When enabled, `s2_hard_sieve_par` measures the per-chunk cost of recomputing
+/// the phi_band_init vector at sub-band positions for the heavy bands (1, 2, 3
+/// at α=2 / 1e18). The measured wall is the dominant unknown in the Design B
+/// budget — if it is negligible relative to the band's solo CPU time the sub-
+/// band chunking refactor pays off; otherwise it cannot. Used by
+/// `RIVAT3_PHI_INIT_PROBE=1` (no CLI flag yet — Phase 0 is one-shot).
+pub fn set_phi_init_probe_override(enable: bool) -> Result<(), bool> {
+    PHI_INIT_PROBE.set(enable)
+}
+
+/// Returns true when the Phase-0 phi_band_init recompute probe should run.
+pub fn phi_init_probe() -> bool {
+    if let Some(&b) = PHI_INIT_PROBE.get() {
+        return b;
+    }
+    std::env::var("RIVAT3_PHI_INIT_PROBE")
+        .ok()
+        .map(|s| !s.is_empty() && s != "0" && s.to_lowercase() != "false")
+        .unwrap_or(false)
+}
+
+/// Disables the Phase-1 dynamic work-pool, reverting `s2_hard_sieve_par` to
+/// the original `(0..num_bands).into_par_iter().map(...)` static partitioning.
+/// Used by `RIVAT3_NO_WORKPOOL=1` for A/B benchmarking. Defaults to false
+/// (= work-pool enabled).
+pub fn set_no_workpool_override(disable: bool) -> Result<(), bool> {
+    NO_WORKPOOL.set(disable)
+}
+
+/// Returns true when the work-pool path should be skipped (= fall back to the
+/// original Rayon par_iter on bands).
+pub fn no_workpool() -> bool {
+    if let Some(&b) = NO_WORKPOOL.get() {
+        return b;
+    }
+    std::env::var("RIVAT3_NO_WORKPOOL")
+        .ok()
+        .map(|s| !s.is_empty() && s != "0" && s.to_lowercase() != "false")
+        .unwrap_or(false)
+}
+
+/// Phase-2 sub-band chunking switches.
+///
+/// `subdivide_heavy()`: number of heaviest ext_easy bands to subdivide
+/// (default 0 = no subdivision = Phase 1 behaviour). Set to 3 to subdivide
+/// the top-3 ext_easy bands (1, 2, 3 at 1e18 α=2 — the canonical hot-spot).
+///
+/// `heavy_chunks()`: number of sub-chunks per heavy band (default 1 = no
+/// subdivision). Total work units = num_bands + n_heavy * (heavy_chunks - 1).
+///
+/// Setting either to its default neutralises Phase 2 (1 chunk per band,
+/// equivalent to the Phase 1 work-pool).
+///
+/// Tuning rationale: heavy_chunks ≈ band_solo_cpu / target_chunk_cpu, where
+/// target_chunk_cpu ≈ median light-band CPU. At 1e18 α=2 / 9700X, band 2 is
+/// 44 s solo, light bands ~2 s, so heavy_chunks ≈ 8.
+pub fn set_subdivide_heavy_override(n: usize) -> Result<(), usize> {
+    SUBDIVIDE_HEAVY.set(n)
+}
+
+pub fn subdivide_heavy() -> usize {
+    if let Some(&n) = SUBDIVIDE_HEAVY.get() {
+        return n;
+    }
+    std::env::var("RIVAT3_SUBDIVIDE_HEAVY")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0)
+}
+
+pub fn set_heavy_chunks_override(n: usize) -> Result<(), usize> {
+    HEAVY_CHUNKS.set(n)
+}
+
+pub fn heavy_chunks() -> usize {
+    if let Some(&n) = HEAVY_CHUNKS.get() {
+        return n;
+    }
+    std::env::var("RIVAT3_HEAVY_CHUNKS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1)
+        .max(1)
+}
+
+/// Phase-3 sub-band chunking for rest_bulk heavy bands (high-blo, span-dominated).
+///
+/// `subdivide_rest_bulk()`: number of heaviest rest_bulk bands to subdivide
+/// (default 0 = no subdivision). Set to 8 to subdivide the 8 widest bands
+/// near z (bands 248-255 at 1e18 α=2 — the rest_bulk hot-spot, ~22 s solo
+/// each, dominating wall after Phase 2 cracked the ext_easy bottleneck).
+///
+/// Shares `heavy_chunks()` with Phase 2: each subdivided rest_bulk band gets
+/// the same K sub-chunks. At 1e18 α=2 / 9700X, K=4 yields ~5.5 s per
+/// sub-chunk (matching ext_easy sub-chunk wall, eliminating the rest_bulk
+/// floor at 28 s).
+pub fn set_subdivide_rest_bulk_override(n: usize) -> Result<(), usize> {
+    SUBDIVIDE_REST_BULK.set(n)
+}
+
+pub fn subdivide_rest_bulk() -> usize {
+    if let Some(&n) = SUBDIVIDE_REST_BULK.get() {
+        return n;
+    }
+    std::env::var("RIVAT3_SUBDIVIDE_REST_BULK")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0)
 }
 
 /// Hardware-adaptive alpha selector for the DR algorithm.

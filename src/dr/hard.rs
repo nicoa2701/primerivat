@@ -473,37 +473,60 @@ pub fn s2_hard_sieve_par(
         phi_vec
     };
 
+    // ── Phi recompute helper (used by Phase 2 sub-chunks at resolve time) ───
+    // Returns phi_vec[bi] = phi(lo, primes[c+bi]) for bi in 0..b_ext, computed
+    // from scratch via a small wheel-30 sieve from 1 to lo. Replays the same
+    // logic as the `initial_phi_vec` block above, parametrised on an arbitrary
+    // `lo`. Cost (Phase 0 measured on 9700X 1e18 α=2): ~0.8 ms at lo = 524k,
+    // ~2.5 ms at lo = 1.6M; scales linearly in lo.
+    let compute_phi_init_at = |lo: u64| -> Vec<i64> {
+        let mut phi_vec = vec![0i64; b_ext];
+        if lo == 0 || b_ext == 0 {
+            return phi_vec;
+        }
+        let n_init  = lo as usize;
+        let n_words = (n_init + 63) / 64;
+        let mut bits: Vec<u64> = vec![!0u64; n_words];
+        bits[0] &= !1u64;
+        let overhang = n_init % 64;
+        if overhang != 0 {
+            bits[n_words - 1] &= (1u64 << overhang) - 1;
+        }
+        for k in 0..c {
+            let p = primes[k] as usize;
+            let mut m = p;
+            while m < n_init {
+                bits[m / 64] &= !(1u64 << (m % 64));
+                m += p;
+            }
+        }
+        let mut count: i64 = bits.iter().map(|w| w.count_ones() as i64).sum();
+        phi_vec[0] = count;
+        for bi in 0..(b_ext - 1) {
+            let pk = primes[c + bi] as usize;
+            let mut m = pk;
+            while m < n_init {
+                let w = m / 64;
+                let mask = 1u64 << (m % 64);
+                if bits[w] & mask != 0 {
+                    bits[w] &= !mask;
+                    count -= 1;
+                }
+                m += pk;
+            }
+            phi_vec[bi + 1] = count;
+        }
+        phi_vec
+    };
+
     // ── P2 setup ─────────────────────────────────────────────────────────────
     // π(lo_start − 1) = seed primes strictly below lo_start (s2_primes > y ≥ lo_start).
     let initial_p2_offset: i64 = primes.partition_point(|&p| p < lo_start) as i64;
 
-    // Per-band P2 walker setup: s2_primes is iterated **descending** in p
-    // (= ascending in q = x/p), so we initialise the walker at the largest
-    // prime ≤ x/band_lo and stop when the walker's rank drops below the
-    // first prime > x/band_hi. Both `start_n` and `min_rank` are derived
-    // from the bitset's `count_le`, replacing the prior `partition_point`
-    // pair on the Vec<u32> slice.
-    //   q_k ≥ band_lo  ↔  p_k ≤ x/band_lo  → walker initial position
-    //   q_k < band_hi  ↔  p_k > x/band_hi  → walker termination rank
-    let p2_band_setup: Vec<(u64, usize)> = (0..num_bands)
-        .map(|t| {
-            let band_lo = band_bounds[t];
-            let band_hi = band_bounds[t + 1].min(z + W30_SEG as u64);
-            let walker_start_n = if band_lo == 0 {
-                s2_primes.hi()
-            } else {
-                ((x / band_lo as u128) as u64).min(s2_primes.hi())
-            };
-            // band_min_rank = count of bitset primes ≤ x/band_hi → first
-            // prime kept has rank ≥ this; smaller-rank primes have q ≥ band_hi.
-            let band_min_rank = if band_hi == 0 {
-                s2_primes.total()
-            } else {
-                s2_primes.count_le((x / band_hi as u128) as u64)
-            };
-            (walker_start_n, band_min_rank)
-        })
-        .collect();
+    // P2 walker setup is now derived per work item in `chunk_setup` (see the
+    // scheduler block below), so the formerly precomputed `p2_band_setup`
+    // array is no longer needed — the closure handles both whole bands and
+    // sub-chunks identically.
 
     // ── Per-prime precomputed wheel data ─────────────────────────────────────────
     // Primes[c..a] are crossed off in every sieve window.  Computing w30res_p,
@@ -701,9 +724,97 @@ pub fn s2_hard_sieve_par(
     }
     ck!("before par_iter (band_sweeps)");
 
-    let band_sweeps: Vec<BandSweep> = (0..num_bands)
-        .into_par_iter()
-        .map(|t| {
+    // ── Phase-0 phi_band_init recompute probe (Design B feasibility) ─────────
+    // Opt-in via `RIVAT3_PHI_INIT_PROBE=1`. Measures the wall-time cost of
+    // rebuilding phi_vec[0..b_ext] from scratch at sub-band positions 1/4,
+    // 1/2, 3/4 within each of the heavy bands {1, 2, 3} (the α=2 / 1e18
+    // ext_easy hot-spot identified in session_handoff_2026-05-03). The probe
+    // dominates Design B's budget: if recompute > ~5 % of band solo CPU,
+    // sub-band chunking can't pay off; otherwise it does.
+    if crate::parameters::phi_init_probe() {
+        // Replays the same sieve-and-count logic as `initial_phi_vec` above,
+        // but parameterised on `lo_target` (an arbitrary chunk_lo within a
+        // band) rather than `lo_start`.  Returns the elapsed wall in nanoseconds
+        // and a checksum (sum of phi_vec) to keep the loop body alive against
+        // dead-code elimination by the optimiser.
+        let probe_phi_init = |lo_target: u64| -> (u128, i64) {
+            let t0 = Instant::now();
+            let mut phi_vec = vec![0i64; b_ext];
+            let n_init  = lo_target as usize;
+            if n_init > 0 && b_ext > 0 {
+                let n_words = (n_init + 63) / 64;
+                let mut bits: Vec<u64> = vec![!0u64; n_words];
+                bits[0] &= !1u64;
+                let overhang = n_init % 64;
+                if overhang != 0 {
+                    bits[n_words - 1] &= (1u64 << overhang) - 1;
+                }
+                for k in 0..c {
+                    let p = primes[k] as usize;
+                    let mut m = p;
+                    while m < n_init {
+                        bits[m / 64] &= !(1u64 << (m % 64));
+                        m += p;
+                    }
+                }
+                let mut count: i64 = bits.iter().map(|w| w.count_ones() as i64).sum();
+                phi_vec[0] = count;
+                for bi in 0..(b_ext - 1) {
+                    let pk = primes[c + bi] as usize;
+                    let mut m = pk;
+                    while m < n_init {
+                        let w = m / 64;
+                        let mask = 1u64 << (m % 64);
+                        if bits[w] & mask != 0 {
+                            bits[w] &= !mask;
+                            count -= 1;
+                        }
+                        m += pk;
+                    }
+                    phi_vec[bi + 1] = count;
+                }
+            }
+            let elapsed = t0.elapsed().as_nanos();
+            let checksum = phi_vec.iter().sum::<i64>();
+            (elapsed, checksum)
+        };
+
+        eprintln!("┌─ phi_init recompute probe (Phase 0, Design B feasibility) ─");
+        eprintln!("│  b_ext = {}, c = {}", b_ext, c);
+        eprintln!("│  band  position    chunk_lo       elapsed     checksum");
+        for &t in &[1usize, 2, 3] {
+            if t + 1 > num_bands { continue; }
+            let blo = band_bounds[t];
+            let bhi = band_bounds[t + 1].min(z + W30_SEG as u64);
+            if bhi <= blo { continue; }
+            let span = bhi - blo;
+            let snap = |lo: u64| (lo / W30_SEG as u64) * W30_SEG as u64;
+            for &(label, num, den) in &[("25%", 1u64, 4u64), ("50%", 1, 2), ("75%", 3, 4)] {
+                let target = snap(blo + span * num / den);
+                let (ns, sum) = probe_phi_init(target);
+                let ms = (ns as f64) / 1_000_000.0;
+                eprintln!("│  {:>4}  {:>5}  {:>13}  {:>9.2} ms  {:>13}",
+                          t, label, target, ms, sum);
+            }
+        }
+        eprintln!("└─");
+    }
+
+    // Process one work unit. Phase 2 generalisation: a "chunk" is either a
+    // whole band (chunk_lo = band_lo, chunk_hi = band_hi) or a sub-range of a
+    // heavy band ([chunk_lo, chunk_hi) ⊆ [band_lo, band_hi)). Internal state
+    // (sieve, easy_ptrs, hard_idx, tiny_state, bulk_active_end, p2_walker) is
+    // initialised at chunk_lo and the sweep iterates [chunk_lo, chunk_hi).
+    // The returned tuple is the same shape as before (a "BandSweep") and is
+    // tagged with (band_id, chunk_lo) by the caller for per-band aggregation.
+    let process_band = |
+        _band_id: usize,
+        chunk_lo: u64,
+        chunk_hi_in: u64,
+        walker_start_n: u64,
+        p2_min_rank: usize,
+        is_chunk_heavy: bool,
+    | -> BandSweep {
             let mut stats = BandStats::default();
 
             // delta only needs b_ext entries: bi >= b_ext use pi-formula.
@@ -720,16 +831,19 @@ pub fn s2_hard_sieve_par(
             let mut ext_fold_count: i64         = 0;
             // Pass-1 deferred snapshots (only populated for heavy bands).
             let mut deferred: Vec<DeferredSeg>  = Vec::new();
-            let band_is_heavy = is_heavy(t);
+            let band_is_heavy = is_chunk_heavy;
 
-            let band_lo = band_bounds[t];
+            // Aliases preserve the body's local naming. `band_lo`/`band_hi` here
+            // refer to the *chunk* boundaries; for whole-band work units they
+            // coincide with the band boundaries.
+            let band_lo = chunk_lo;
             if band_lo > z {
                 return (delta, p2_count, leaf_partial, bi_contrib,
                         p2_partial, p2_q_count,
                         ext_fold_partial, ext_fold_count,
                         stats);
             }
-            let band_hi = band_bounds[t + 1].min(z + W30_SEG as u64);
+            let band_hi = chunk_hi_in;
 
             // Easy iterator init. In addition to the band's n-range cap
             // (pl ≤ x/(pb*blo)), we also cap at the NON-CLAMP boundary
@@ -765,11 +879,12 @@ pub fn s2_hard_sieve_par(
                 );
             }
 
-            // Per-band P2 walker: descends through s2_primes from largest p
+            // Per-chunk P2 walker: descends through s2_primes from largest p
             // (smallest q = x/p) toward smallest p (largest q). Stops once
             // walker.rank() < p2_min_rank, i.e. once the next prime would
-            // have q ≥ band_hi (out of this band's q-range).
-            let (walker_start_n, p2_min_rank) = p2_band_setup[t];
+            // have q ≥ chunk_hi (out of this chunk's q-range). The setup
+            // values are computed by the caller (cf. `chunk_setup_at`) so the
+            // closure is identical for whole-band and sub-chunk work units.
             let mut p2_walker = s2_primes.walker_at(walker_start_n);
 
             let mut tiny_state = phi_tiny_state(band_lo);
@@ -1279,30 +1394,312 @@ pub fn s2_hard_sieve_par(
              p2_partial, p2_q_count,
              ext_fold_partial, ext_fold_count,
              stats)
-        })
-        .collect();
+    };
+
+    // ── Phase 1+2 scheduler ────────────────────────────────────────────────
+    //
+    // Phase 1: dynamic work-pool with hybrid ordering. Top-N ext_easy heavy
+    // bands head the queue (their `tail_ext_easy_emit` cost dominates wall at
+    // 1e18 α=2); the rest stays in natural `t` order to preserve cache
+    // locality on `pb_data` for the consecutive-band sweep.
+    //
+    // Phase 2: optional sub-band chunking of the heaviest ext_easy bands,
+    // gated by `RIVAT3_SUBDIVIDE_HEAVY` (number of bands) and
+    // `RIVAT3_HEAVY_CHUNKS` (chunks per band). Default off (= Phase 1).
+    // Subdivided bands get K work units each [chunk_lo, chunk_hi); the
+    // resolve pass recomputes `phi_init` from scratch at chunk_lo for every
+    // sub-chunk via `compute_phi_init_at` (cost ~2 ms per chunk at 1e18 α=2).
+    //
+    // Opt-out via `RIVAT3_NO_WORKPOOL=1` (reverts to original par_iter).
+    // ext_easy_weight: heavier ↦ band whose `tail_ext_easy_emit` is expected
+    // to dominate. The dominant cost factor is the ext leaf count, which for
+    // a thin band scales like ext_emit ∝ (1/blo - 1/bhi) ≈ span/(blo*bhi).
+    // For low-blo bands this is huge; for high-blo (rest_bulk-dominated) bands
+    // it's negligible. Band 0 starts at lo_start which may be 0 — but at large
+    // x α=2 it is structurally light (most "very low n" leaves are clamped
+    // and bulk-counted), so we exclude it from the head explicitly.
+    //
+    // Earlier attempt: filter `mid < x^(1/4)` was *too* restrictive. At
+    // 1e18 α=2, x^(1/4) ≈ 31k but the heavy ext_easy bands sit at mid
+    // ≈ 800k-1.8M, so every weight returned 0 → empty `head` → Phase 1
+    // ordering was a no-op AND Phase 2 subdivision never triggered.
+    let ext_easy_weight = |t: usize| -> u64 {
+        let blo = band_bounds[t];
+        let bhi = band_bounds[t + 1].min(z + W30_SEG as u64);
+        if bhi <= blo { return 0; }
+        if blo == 0 { return 0; }
+        // 1/blo proxy, scaled to fit u64.
+        u64::MAX / blo
+    };
+
+    // Tunable: how many heavy ext_easy bands get a head start. 3 matches the
+    // 1e18 α=2 hot-spot (bands 1, 2, 3 each at 30-44 s solo).
+    const N_HEAD: usize = 3;
+    let mut head: Vec<usize> = (0..num_bands).collect();
+    head.sort_by(|&a, &b| ext_easy_weight(b).cmp(&ext_easy_weight(a)));
+    head.truncate(N_HEAD.min(num_bands));
+    head.retain(|&t| ext_easy_weight(t) > 0);
+
+    // Phase 2/3 subdivision config.
+    //
+    // - Phase 2 (`subdivide_heavy`): top-N ext_easy heavy bands (bands 1, 2, 3
+    //   at 1e18 α=2 — the `tail_ext_easy_emit` hot-spot identified in
+    //   session 2026-05-03). These are the LOW-blo bands.
+    // - Phase 3 (`subdivide_rest_bulk`): top-N rest_bulk heavy bands (bands
+    //   248-255 at 1e18 α=2 — the `rest_bulk_xoff` floor uncovered after
+    //   Phase 2 cracked ext_easy). These are the HIGH-blo bands near z.
+    //
+    // Both subdivisions share `heavy_chunks` (K) — each heavy band, regardless
+    // of regime, is split into K sub-chunks aligned to W30_SEG. The disjoint
+    // nature of ext_easy heavy (low blo) and rest_bulk heavy (high blo) means
+    // the two sets don't overlap at 1e18 α=2.
+    let n_subdivide_ext  = crate::parameters::subdivide_heavy().min(head.len());
+    let n_subdivide_bulk = crate::parameters::subdivide_rest_bulk();
+    let chunks_per_heavy = crate::parameters::heavy_chunks();
+
+    // rest_bulk_weight: span-dominated, since rest_bulk_xoff cost ∝ segments
+    // (= span / W30_SEG). Excludes band 0 and empty bands.
+    let rest_bulk_weight = |t: usize| -> u64 {
+        let blo = band_bounds[t];
+        let bhi = band_bounds[t + 1].min(z + W30_SEG as u64);
+        if bhi <= blo { return 0; }
+        if blo == 0 { return 0; }
+        bhi - blo
+    };
+
+    let mut rest_bulk_heavy: Vec<usize> = (0..num_bands).collect();
+    rest_bulk_heavy.sort_by(|&a, &b| rest_bulk_weight(b).cmp(&rest_bulk_weight(a)));
+    rest_bulk_heavy.truncate(n_subdivide_bulk.min(num_bands));
+    rest_bulk_heavy.retain(|&t| rest_bulk_weight(t) > 0);
+
+    let mut subdivide_set: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    subdivide_set.extend(head.iter().take(n_subdivide_ext).copied());
+    subdivide_set.extend(rest_bulk_heavy.iter().copied());
+
+    // chunk_setup: derive (walker_start_n, p2_min_rank) from a chunk's
+    // [chunk_lo, chunk_hi) — replays the formula used by `p2_band_setup`
+    // but parametrised so it works for sub-chunks too.
+    let chunk_setup = |chunk_lo: u64, chunk_hi: u64| -> (u64, usize) {
+        let walker_start_n = if chunk_lo == 0 {
+            s2_primes.hi()
+        } else {
+            ((x / chunk_lo as u128) as u64).min(s2_primes.hi())
+        };
+        let p2_min_rank = if chunk_hi == 0 {
+            s2_primes.total()
+        } else {
+            s2_primes.count_le((x / chunk_hi as u128) as u64)
+        };
+        (walker_start_n, p2_min_rank)
+    };
+
+    #[derive(Clone, Copy)]
+    struct WorkItem {
+        band_id: usize,
+        chunk_lo: u64,
+        chunk_hi: u64,
+        walker_start_n: u64,
+        p2_min_rank: usize,
+        is_heavy: bool,
+    }
+
+    let w_seg = W30_SEG as u64;
+    let mut work_items: Vec<WorkItem> = Vec::with_capacity(
+        num_bands + (n_subdivide_ext + n_subdivide_bulk) * chunks_per_heavy.saturating_sub(1)
+    );
+    for t in 0..num_bands {
+        let band_lo = band_bounds[t];
+        let band_hi = band_bounds[t + 1].min(z + W30_SEG as u64);
+        if subdivide_set.contains(&t) && chunks_per_heavy > 1 && band_hi > band_lo {
+            // Subdivide [band_lo, band_hi) into `chunks_per_heavy` ranges
+            // aligned to W30_SEG. Sub-chunks always run single-pass; the
+            // deferred-tail-ext path's pass-2 nested par_iter assumes the
+            // band is processed as one stateful unit and breaks across
+            // chunk boundaries.
+            let span = band_hi - band_lo;
+            let n_segs = (span + w_seg - 1) / w_seg;
+            let segs_per_chunk =
+                (n_segs + chunks_per_heavy as u64 - 1) / chunks_per_heavy as u64;
+            let mut prev = band_lo;
+            for k in 0..chunks_per_heavy {
+                let chunk_hi = if k + 1 == chunks_per_heavy {
+                    band_hi
+                } else {
+                    (prev + segs_per_chunk * w_seg).min(band_hi)
+                };
+                if chunk_hi <= prev { break; }
+                let (walker_start_n, p2_min_rank) = chunk_setup(prev, chunk_hi);
+                work_items.push(WorkItem {
+                    band_id: t,
+                    chunk_lo: prev,
+                    chunk_hi,
+                    walker_start_n,
+                    p2_min_rank,
+                    is_heavy: false,
+                });
+                prev = chunk_hi;
+            }
+        } else {
+            let (walker_start_n, p2_min_rank) = chunk_setup(band_lo, band_hi);
+            work_items.push(WorkItem {
+                band_id: t,
+                chunk_lo: band_lo,
+                chunk_hi: band_hi,
+                walker_start_n,
+                p2_min_rank,
+                is_heavy: is_heavy(t),
+            });
+        }
+    }
+    let n_items = work_items.len();
+
+    // Item processing order. Items are sorted by predicted CPU cost descending,
+    // so the longest items start first and the shortest items mop up at the end.
+    // This addresses the natural-order failure mode at 1e18 α=2 K=8: the 8
+    // rest_bulk heavies (bands 248-255, ~22 s solo each) sat at the *end* of
+    // the queue, were picked up at t ≈ 30 s when only a fraction of workers
+    // remained free, and stretched wall by another 22 s.
+    //
+    // Cost proxy combines two regimes:
+    //   ext_easy cost ∝ x·span / (lo·hi)     # ≈ ext leaves emitted
+    //   rest_bulk cost ∝ span                # linear sweep cost
+    // Empirically both contribute additively to band wall; the calibration
+    // factor (`* 7`) balances ext_easy and rest_bulk so that whole bands
+    // and rest_bulks rank in the right order at 1e18 α=2.
+    let predicted_cost = |item: &WorkItem| -> u64 {
+        let lo = item.chunk_lo.max(W30_SEG as u64);
+        let hi = item.chunk_hi.max(lo + 1);
+        let span = hi - lo;
+        let ext_easy = (x * span as u128) / (lo as u128 * hi as u128);
+        let rest_bulk = span as u128;
+        // Calibration: at 1e18 α=2, band 2 (whole, ext_easy) = 44 s, ext_easy
+        // proxy = 3.2e11 → 7.3e9/s. Band 252 (rest_bulk) = 22 s, span = 22e9
+        // → 1.0e9/s. Scale ext_easy by ×1/7 to align with rest_bulk seconds.
+        let cost = ext_easy / 7 + rest_bulk;
+        cost.min(u64::MAX as u128) as u64
+    };
+
+    let mut item_order: Vec<usize> = (0..n_items).collect();
+    item_order.sort_by(|&a, &b| predicted_cost(&work_items[b]).cmp(&predicted_cost(&work_items[a])));
+
+    let process_item = |item: &WorkItem| -> BandSweep {
+        process_band(
+            item.band_id,
+            item.chunk_lo,
+            item.chunk_hi,
+            item.walker_start_n,
+            item.p2_min_rank,
+            item.is_heavy,
+        )
+    };
+
+    ck!("before par_iter (work_items)");
+
+    // chunk_outputs: (band_id, chunk_lo, sweep), one per work item, in
+    // work_items order (NOT processing order).
+    let chunk_outputs: Vec<(usize, u64, BandSweep)> = if !crate::parameters::no_workpool() {
+        use std::sync::Mutex;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let cursor = AtomicUsize::new(0);
+        let results: Vec<Mutex<Option<BandSweep>>> =
+            (0..n_items).map(|_| Mutex::new(None)).collect();
+        let n_workers = rayon::current_num_threads().max(1);
+
+        rayon::scope(|s| {
+            let process_item = &process_item;
+            let work_items = &work_items;
+            let item_order = &item_order;
+            let cursor = &cursor;
+            let results = &results;
+            for _ in 0..n_workers {
+                s.spawn(move |_| {
+                    loop {
+                        let i = cursor.fetch_add(1, Ordering::Relaxed);
+                        if i >= n_items { break; }
+                        let item_idx = item_order[i];
+                        let r = process_item(&work_items[item_idx]);
+                        *results[item_idx].lock().unwrap() = Some(r);
+                    }
+                });
+            }
+        });
+
+        results.into_iter().enumerate()
+            .map(|(i, m)| {
+                let sw = m.into_inner().unwrap()
+                    .expect("workpool: every item slot must be filled exactly once");
+                (work_items[i].band_id, work_items[i].chunk_lo, sw)
+            })
+            .collect()
+    } else {
+        (0..n_items).into_par_iter()
+            .map(|i| {
+                let sw = process_item(&work_items[i]);
+                (work_items[i].band_id, work_items[i].chunk_lo, sw)
+            })
+            .collect()
+    };
 
     ck!("after  par_iter collected");
 
-    // ── Sequential prefix scan for phi / P2 per band ─────────────────────────
+    // Group chunks per band and sort each band's chunks by chunk_lo asc.
+    let mut chunks_per_band: Vec<Vec<(u64, BandSweep)>> = (0..num_bands).map(|_| Vec::new()).collect();
+    for (band_id, chunk_lo, sweep) in chunk_outputs {
+        chunks_per_band[band_id].push((chunk_lo, sweep));
+    }
+    for v in chunks_per_band.iter_mut() {
+        v.sort_by_key(|(lo, _)| *lo);
+    }
+
+    // Per-band aggregated delta (sum of sub-chunk deltas) and p2_count.
+    // Both are commutative across sub-chunks.
+    let delta_for_band: Vec<Vec<i64>> = chunks_per_band.iter().map(|chunks| {
+        let mut d = vec![0i64; b_ext];
+        for (_, sw) in chunks {
+            for bi in 0..b_ext { d[bi] += sw.0[bi]; }
+        }
+        d
+    }).collect();
+    let p2_count_for_band: Vec<i64> = chunks_per_band.iter().map(|chunks| {
+        chunks.iter().map(|(_, sw)| sw.1).sum()
+    }).collect();
+
+    // Sequential prefix-sum for phi / P2 init at each band_lo[t].
     let mut phi_band_inits: Vec<Vec<i64>> = vec![vec![0i64; b_ext]; num_bands];
     phi_band_inits[0] = initial_phi_vec;
     for t in 1..num_bands {
         for bi in 0..b_ext {
             phi_band_inits[t][bi] =
-                phi_band_inits[t - 1][bi] + band_sweeps[t - 1].0[bi];
+                phi_band_inits[t - 1][bi] + delta_for_band[t - 1][bi];
         }
     }
     let mut p2_band_inits = vec![initial_p2_offset; num_bands];
     for t in 1..num_bands {
-        p2_band_inits[t] = p2_band_inits[t - 1] + band_sweeps[t - 1].1;
+        p2_band_inits[t] = p2_band_inits[t - 1] + p2_count_for_band[t - 1];
     }
 
-    // ── Accumulate sweep stats across bands + collect per-band breakdown. ─
+    // Per-band stats aggregation (sum across sub-chunks) + global agg.
     let mut agg = BandStats::default();
     let mut per_band: Vec<BandProfile> = Vec::with_capacity(num_bands);
-    for (t, b) in band_sweeps.iter().enumerate() {
-        let s = &b.8;
+    for (t, chunks) in chunks_per_band.iter().enumerate() {
+        let mut s = BandStats::default();
+        for (_, sw) in chunks {
+            let cs = &sw.8;
+            s.fill_ns           += cs.fill_ns;
+            s.bi_main_ns        += cs.bi_main_ns;
+            s.bi_main_leaf_ns   += cs.bi_main_leaf_ns;
+            s.rest_plain_ns     += cs.rest_plain_ns;
+            s.rest_bulk_ns      += cs.rest_bulk_ns;
+            s.tail_prefix_ns    += cs.tail_prefix_ns;
+            s.tail_ext_ns       += cs.tail_ext_ns;
+            s.tail_p2_ns        += cs.tail_p2_ns;
+            s.tail_advance_ns   += cs.tail_advance_ns;
+            s.n_bi_leaf_hits    += cs.n_bi_leaf_hits;
+            s.n_ext_emitted     += cs.n_ext_emitted;
+            s.n_prefix_fills    += cs.n_prefix_fills;
+            s.n_bulk_active_sum += cs.n_bulk_active_sum;
+        }
         agg.fill_ns           += s.fill_ns;
         agg.bi_main_ns        += s.bi_main_ns;
         agg.bi_main_leaf_ns   += s.bi_main_leaf_ns;
@@ -1339,33 +1736,61 @@ pub fn s2_hard_sieve_par(
 
     ck!("before resolution pass");
 
-    // ── Resolution pass (parallel per band) ──────────────────────────────────
+    // Resolution pass: per chunk, combine local accumulators with the
+    // appropriate (phi_init, p2_init) reference. For whole-band chunks
+    // (chunk_lo == band_lo[t]), the prefix-sum'd phi_band_inits[t] and
+    // p2_band_inits[t] are the correct reference. For sub-chunks
+    // (chunk_lo > band_lo[t]), recompute phi_init from scratch at chunk_lo
+    // via `compute_phi_init_at` and p2_init via `partition_point` on `primes`
+    // — cost ~1-3 ms per sub-chunk, negligible vs sub-chunk's sweep wall.
     let t_resolve = Instant::now();
     let resolved: Vec<(i128, u128)> = (0..num_bands)
         .into_par_iter()
         .map(|t| {
-            let phi_init = &phi_band_inits[t];
-            let p2_init  = p2_band_inits[t];
-            let band = &band_sweeps[t];
-            let leaf_partial      = band.2;
-            let bi_contrib        = &band.3;
-            let p2_partial        = band.4;
-            let p2_q_count        = band.5;
-            let ext_fold_partial  = band.6;
-            let ext_fold_count    = band.7;
+            let chunks = &chunks_per_band[t];
+            let band_lo = band_bounds[t];
+            let mut total_sum: i128 = 0;
+            let mut total_p2: u128 = 0;
+            for (chunk_lo, sw) in chunks {
+                let (phi_init_owned, p2_init): (Vec<i64>, i64) = if *chunk_lo == band_lo {
+                    (phi_band_inits[t].clone(), p2_band_inits[t])
+                } else {
+                    let phi = compute_phi_init_at(*chunk_lo);
+                    // p2_init = π(chunk_lo - 1) = count of primes strictly below
+                    // chunk_lo. Primes ≤ y live in the `primes` Vec; primes in
+                    // (y, z] live in `s2_primes`. For chunk_lo ≤ y the bitset
+                    // contributes 0; for chunk_lo > y we add the bitset count
+                    // up to chunk_lo - 1. (Phase 2 ext_easy sub-chunks always
+                    // have chunk_lo ≤ y, so this only matters for Phase 3
+                    // rest_bulk sub-chunks where chunk_lo can exceed y.)
+                    let seed_count = primes.partition_point(|&p| p < *chunk_lo) as i64;
+                    let bitset_count = if *chunk_lo > 0 {
+                        s2_primes.count_le(*chunk_lo - 1) as i64
+                    } else { 0 };
+                    let p2 = seed_count + bitset_count;
+                    (phi, p2)
+                };
+                let phi_init: &[i64] = &phi_init_owned;
+                let leaf_partial      = sw.2;
+                let bi_contrib        = &sw.3;
+                let p2_partial        = sw.4;
+                let p2_q_count        = sw.5;
+                let ext_fold_partial  = sw.6;
+                let ext_fold_count    = sw.7;
 
-            // Leaf contribution (fully folded).
-            let mut sum: i128 = leaf_partial;
-            for bi in 0..bi_contrib.len() {
-                sum += (bi_contrib[bi] as i128) * (phi_init[bi] as i128);
+                let mut sum: i128 = leaf_partial;
+                for bi in 0..bi_contrib.len() {
+                    sum += (bi_contrib[bi] as i128) * (phi_init[bi] as i128);
+                }
+                sum += (p2_init as i128) * (ext_fold_count as i128) + ext_fold_partial;
+                total_sum += sum;
+                let p2_sum_i: i128 =
+                    (p2_init as i128) * (p2_q_count as i128) + p2_partial;
+                if p2_sum_i > 0 {
+                    total_p2 += p2_sum_i as u128;
+                }
             }
-            // Ext-easy folded part (Piste 3 guarantees no clamp).
-            sum += (p2_init as i128) * (ext_fold_count as i128) + ext_fold_partial;
-            // P2 contribution (fully folded).
-            let p2_sum_i: i128 =
-                (p2_init as i128) * (p2_q_count as i128) + p2_partial;
-            let p2_sum: u128 = if p2_sum_i < 0 { 0 } else { p2_sum_i as u128 };
-            (sum, p2_sum)
+            (total_sum, total_p2)
         })
         .collect();
     let ns_resolve = t_resolve.elapsed().as_nanos() as u64;
