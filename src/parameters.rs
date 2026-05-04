@@ -12,6 +12,7 @@ static NO_WORKPOOL: OnceLock<bool> = OnceLock::new();
 static SUBDIVIDE_HEAVY: OnceLock<usize> = OnceLock::new();
 static SUBDIVIDE_REST_BULK: OnceLock<usize> = OnceLock::new();
 static HEAVY_CHUNKS: OnceLock<usize> = OnceLock::new();
+static TINY_C_OVERRIDE: OnceLock<usize> = OnceLock::new();
 
 /// Pins the process-wide alpha value, bypassing hardware-adaptive selection.
 /// Only the first call takes effect; returns `Err` if already set.
@@ -187,6 +188,24 @@ pub fn heavy_chunks() -> usize {
         .and_then(|s| s.parse().ok())
         .unwrap_or(1)
         .max(1)
+}
+
+/// Number of tiny primes absorbed by phi_tiny/S1/S2_hard. Defaults to 5, the
+/// measured-fast production setting on 9700X. Use `RIVAT3_TINY_C=6` or `8`
+/// to benchmark the primecount-style wider tiny prefix.
+pub fn set_tiny_c_override(n: usize) -> Result<(), usize> {
+    TINY_C_OVERRIDE.set(n)
+}
+
+pub fn tiny_c() -> usize {
+    if let Some(&n) = TINY_C_OVERRIDE.get() {
+        return n.clamp(3, crate::phi::PHI_TINY_MAX_A);
+    }
+    std::env::var("RIVAT3_TINY_C")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(5)
+        .clamp(3, crate::phi::PHI_TINY_MAX_A)
 }
 
 /// Phase-3 sub-band chunking for rest_bulk heavy bands (high-blo, span-dominated).

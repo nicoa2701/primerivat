@@ -69,7 +69,8 @@ deferred-tail-ext pour le régime α=2) :
 Les gains cumulés viennent du cascade S2_hard multi-commits (single-pass
 deferred-leaf design, fold accumulators, band layout log-scale pour
 α=2, clamp-leaf bulk pre-count, template pré-sieve `{7, 11}`, popcount
-via LUT 240 bits, cross-off Kim-style 8-way déroulé dans `bi_main_xoff`
+ensuite généralisé jusqu'à `C=8`, popcount via LUT 240 bits, cross-off
+Kim-style 8-way déroulé dans `bi_main_xoff`
 et `rest_plain_xoff`, 2-pass deferred-tail-ext, et la règle α adaptative
 2-tier).
 
@@ -85,7 +86,7 @@ Le moteur implémente la décomposition classique Meissel–Deléglise–Rivat :
 avec `a = π(y)`, `y = α·∛x`, et :
 
 - **S1** — `Σ μ(m)·φ(x/m, c)` sur les `m` squarefree dont les facteurs premiers
-  sont ≤ `y`, calculé par un DFS récursif avec `c = 5`.
+  sont ≤ `y`, calculé par un DFS récursif avec `c` configurable (`C=5` par défaut).
 - **S2_hard** — `−Σ_{b=c+1..b_max} Σ_m μ(m)·φ(x/(p_b·m), b−1)`, évalué via
   trois chemins spécialisés.
 - **P2** — `Σ_{y < p ≤ √x} (π(x/p) − π(p) + 1)`, fusionné avec S2_hard dans
@@ -136,8 +137,9 @@ moteur retombe sur l'α sélectionné automatiquement.
 
 ### Fallback pour les petits x
 
-Si `a ≤ C = 5`, le driver bascule sur la baseline Lucy–Meissel
-(`baseline::prime_pi`) car `phi_small_a` ne peut pas être utilisé.
+Si `a ≤ C`, le driver bascule sur la baseline Lucy–Meissel
+(`baseline::prime_pi`). Par défaut `C=5` ; `RIVAT3_TINY_C=6|8` active le
+préfixe tiny plus large façon primecount pour les benchmarks.
 
 ## Parallélisme
 
@@ -168,7 +170,7 @@ src/
 │   ├── ordinary.rs # régions de leaves ordinary exploratoires
 │   ├── trivial.rs
 │   └── types.rs    # DrContext, domaines, règles de frontière
-├── phi.rs          # DFS s1_ordinary, phi_small_a (inclusion/exclusion c ≤ 5)
+├── phi.rs          # DFS s1_ordinary, phi_small_a (inclusion/exclusion c ≤ 8)
 ├── sieve.rs        # crible Lucy (seed_primes)
 ├── parameters.rs   # types partagés
 ├── lib.rs          # API publique
@@ -230,11 +232,11 @@ Valeurs de référence vérifiées :
    chaque requête ne popcount que les mots u64 traversés depuis la leaf
    précédente. Remplace le `fill_prefix_counts` (balayage complet de ~2 185
    mots) qui s'exécutait une fois par bi avec leaves.
-3. **Template pré-sieve `{7, 11}`** — `fill_presieved_7_11` tile un bitmap
-   précalculé de 77 octets (couvrant `lcm(7, 11) · 30 = 2 310` entiers) dans
-   le crible au début de chaque segment, en remplacement du fill-à-1 et des
-   deux boucles de cross-off wheel-30. Le byte-copy séquentiel vectorise
-   bien et évite les bit writes scattered du chemin générique.
+3. **Templates pré-sieve tiny-primes** — `fill_presieved(c)` tile des bitmaps
+   wheel-30 générés pour `c=4..8` dans le crible au début de chaque segment,
+   en remplacement du fill-à-1 et des boucles tiny-prime de cross-off
+   wheel-30. Le byte-copy séquentiel vectorise bien et évite les bit writes
+   scattered du chemin générique.
 4. **Crible bucket** — dans le cross-off de masse pour les primes `≥ x¹ᐟ⁴`,
    les primes tels que `p² > hi` sont skippés : toute composite dans
    `[lo, hi)` admet un facteur `≤ √hi`.

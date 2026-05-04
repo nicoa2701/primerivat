@@ -69,7 +69,8 @@ popcount LUT-240, single-pass merge, fold accumulators, band-split 16×,
 The cumulative gains come from the multi-commit S2_hard refactor cascade
 (single-pass deferred-leaf design, fold accumulators, log-scale band
 layout for α=2, clamp-leaf bulk pre-count, `{7, 11}` pre-sieve tile,
-popcount via 240-bit LUT, Kim-style 8-way unrolled cross-off in
+then generalized tiny-prime pre-sieve up to `C=8`, popcount via 240-bit LUT,
+Kim-style 8-way unrolled cross-off in
 `bi_main_xoff` and `rest_plain_xoff`, 2-pass deferred-tail-ext, and the
 2-tier adaptive α rule).
 
@@ -85,7 +86,7 @@ The engine implements the classical Meissel–Deléglise–Rivat decomposition:
 with `a = π(y)`, `y = α·∛x`, and:
 
 - **S1** — `Σ μ(m)·φ(x/m, c)` over squarefree `m` with prime factors ≤ `y`,
-  computed by a recursive DFS with `c = 5`.
+  computed by a recursive DFS with configurable `c` (default `C=5`).
 - **S2_hard** — `−Σ_{b=c+1..b_max} Σ_m μ(m)·φ(x/(p_b·m), b−1)`, evaluated
   through three specialized paths.
 - **P2** — `Σ_{y < p ≤ √x} (π(x/p) − π(p) + 1)`, fused with S2_hard in a
@@ -135,8 +136,9 @@ engine falls back to the auto-selected α.
 
 ### Fallback for small x
 
-If `a ≤ C = 5`, the driver falls back to the Lucy–Meissel baseline
-(`baseline::prime_pi`) since `phi_small_a` cannot be used.
+If `a ≤ C`, the driver falls back to the Lucy–Meissel baseline
+(`baseline::prime_pi`). By default `C=5`; `RIVAT3_TINY_C=6|8` enables the
+primecount-style wider tiny prefix for benchmarks.
 
 ## Parallelism
 
@@ -165,7 +167,7 @@ src/
 │   ├── ordinary.rs # exploratory ordinary-leaf regions
 │   ├── trivial.rs
 │   └── types.rs    # DrContext, domains, boundary rules
-├── phi.rs          # s1_ordinary DFS, phi_small_a (inclusion/exclusion c ≤ 5)
+├── phi.rs          # s1_ordinary DFS, phi_small_a (inclusion/exclusion c ≤ 8)
 ├── sieve.rs        # Lucy sieve (seed_primes)
 ├── parameters.rs   # shared types
 ├── lib.rs          # public API
@@ -234,11 +236,11 @@ Reference values checked:
    leaf query only popcounts the u64 words newly traversed since the previous
    leaf. Replaces the `fill_prefix_counts` full-sieve popcount sweep
    (~2 185 words per call) that used to run once per bi with leaves.
-3. **Pre-sieve `{7, 11}` template** — `fill_presieved_7_11` tiles a
-   precomputed 77-byte bitmap (covering `lcm(7, 11) · 30 = 2 310` integers)
-   into the sieve at each segment start, replacing the ones-fill + two
-   wheel-30 cross-off loops. Sequential byte-copy vectorises well, avoiding
-   the scattered bit writes of the generic path.
+3. **Tiny-prime pre-sieve templates** — `fill_presieved(c)` tiles generated
+   wheel-30 bitmaps for `c=4..8` into the sieve at each segment start,
+   replacing the ones-fill + tiny-prime wheel-30 cross-off loops. Sequential
+   byte-copy vectorises well, avoiding the scattered bit writes of the generic
+   path.
 4. **Kim-style 8-way unrolled cross-off** — `cross_off_pd_unrolled` (used
    by `rest_plain_xoff`) and `cross_off_count_pd_unrolled` (used by
    `bi_main_xoff`) dispatch on the prime's residue group `g = p % 30 ∈ {1,

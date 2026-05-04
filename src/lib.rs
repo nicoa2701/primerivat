@@ -24,9 +24,9 @@ pub fn prime_pi_with_threads(x: u128, threads: usize) -> u128 {
 /// Deléglise-Rivat prime counting — current production engine.
 ///
 /// Delegates to [`dr::prime_pi_dr_meissel_v4`]: hardware-adaptive α,
-/// fused S2_hard + P2 sweep with monotonic leaf scan and `{7, 11}`
+/// fused S2_hard + P2 sweep with monotonic leaf scan and tiny-prime
 /// pre-sieve template, and a baseline fallback for small `x`
-/// (when `π(α·∛x) ≤ 5`).
+/// (when `π(α·∛x)` is inside the configured tiny-prime prefix).
 #[allow(non_snake_case)]
 pub fn deleglise_rivat(x: u128) -> u128 {
     dr::prime_pi_dr_meissel_v4(x)

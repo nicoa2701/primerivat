@@ -4,7 +4,7 @@
 /// `num_threads × wall_time_of_s2_hard`.
 #[derive(Default, Clone, Debug)]
 pub struct HardProfile {
-    /// Single-pass sweep: sieve.fill_presieved_7_11 / sieve.fill + total_count.
+    /// Single-pass sweep: sieve.fill_presieved / sieve.fill + total_count.
     pub sweep_fill_ns: u64,
 
     /// bi ∈ [0, b_limit) main loop (counted cross-off + leaf emit, bundled).
@@ -966,8 +966,8 @@ pub fn s2_hard_sieve_par(
                     b_limit -= 1;
                 }
                 let t_fill = Instant::now();
-                if c == 5 {
-                    sieve.fill_presieved_7_11(lo);
+                if WheelSieve30::supports_presieved(c) {
+                    sieve.fill_presieved(lo, c);
                 } else {
                     sieve.fill(lo, &tiny_state);
                 }

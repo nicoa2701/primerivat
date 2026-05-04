@@ -438,34 +438,40 @@ impl Default for MonoCount {
     fn default() -> Self { Self::new() }
 }
 
-/// Pre-sieved pattern for primes {7, 11} over one full wheel-30 period of
-/// `lcm(7, 11) = 77` groups (= 2310 integers). Bit `j` of byte `g` is 1 iff
-/// the integer `g*30 + W30_RESIDUES[j]` is coprime to both 7 and 11.
-///
-/// Initialised on first use by [`get_presieve_7_11`]. Using this template
-/// lets [`WheelSieve30::fill_presieved_7_11`] skip the per-segment
-/// cross-off loops for 7 and 11 (the tiny-prime stage used by the S2_hard
-/// sweep), replacing them with a straight byte tile.
-const PRESIEVE_BYTES: usize = 7 * 11;       // 77 bytes cover 2310 integers
-const PRESIEVE_SPAN:  u64   = (PRESIEVE_BYTES as u64) * 30;  // 2310
+/// Pre-sieved wheel-30 patterns for tiny-prime prefixes. The wheel already
+/// absorbs {2,3,5}; these templates additionally remove primes[3..c].
+static PRESIEVE_C4: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+static PRESIEVE_C5: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+static PRESIEVE_C6: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+static PRESIEVE_C7: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+static PRESIEVE_C8: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
 
-static PRESIEVE_7_11: std::sync::OnceLock<[u8; PRESIEVE_BYTES]> = std::sync::OnceLock::new();
-
-fn get_presieve_7_11() -> &'static [u8; PRESIEVE_BYTES] {
-    PRESIEVE_7_11.get_or_init(|| {
-        let mut t = [0u8; PRESIEVE_BYTES];
-        for g in 0..PRESIEVE_BYTES {
-            let mut byte = 0u8;
-            for j in 0..8 {
-                let n = g * 30 + W30_RESIDUES[j] as usize;
-                if n % 7 != 0 && n % 11 != 0 {
-                    byte |= 1 << j;
-                }
+fn build_presieve_template(tiny_primes: &[usize]) -> Vec<u8> {
+    let bytes: usize = tiny_primes.iter().product();
+    let mut t = vec![0u8; bytes];
+    for g in 0..bytes {
+        let mut byte = 0u8;
+        for j in 0..8 {
+            let n = g * 30 + W30_RESIDUES[j] as usize;
+            if tiny_primes.iter().all(|&p| n % p != 0) {
+                byte |= 1 << j;
             }
-            t[g] = byte;
         }
-        t
-    })
+        t[g] = byte;
+    }
+    t
+}
+
+fn get_presieve_template(c: usize) -> Option<&'static [u8]> {
+    match c {
+        0..=3 => None,
+        4 => Some(PRESIEVE_C4.get_or_init(|| build_presieve_template(&[7])).as_slice()),
+        5 => Some(PRESIEVE_C5.get_or_init(|| build_presieve_template(&[7, 11])).as_slice()),
+        6 => Some(PRESIEVE_C6.get_or_init(|| build_presieve_template(&[7, 11, 13])).as_slice()),
+        7 => Some(PRESIEVE_C7.get_or_init(|| build_presieve_template(&[7, 11, 13, 17])).as_slice()),
+        8 => Some(PRESIEVE_C8.get_or_init(|| build_presieve_template(&[7, 11, 13, 17, 19])).as_slice()),
+        _ => None,
+    }
 }
 
 impl WheelSieve30 {
@@ -571,16 +577,19 @@ impl WheelSieve30 {
         }
     }
 
-    /// Specialised `fill` for the tiny-prime set `{7, 11}`. Replaces the
-    /// ones-fill + per-prime wheel-30 cross-off loops with a straight tile
-    /// of the pre-computed template, cutting ~32k bit writes per segment.
+    /// Specialised `fill` for a tiny-prime prefix. Replaces the ones-fill +
+    /// per-prime wheel-30 cross-off loops with a straight tile of the generated
+    /// template, cutting many small-prime bit writes per segment.
     ///
-    /// Semantically equivalent to `fill(lo, &[(7, m7), (11, m11)])` with the
-    /// correct starting multiples, but independent of the segment boundary.
+    /// Semantically equivalent to crossing off primes[3..c] with the correct
+    /// starting multiples, but independent of the segment boundary.
     /// `lo` must be a multiple of 30.
-    pub fn fill_presieved_7_11(&mut self, lo: u64) {
+    pub fn fill_presieved(&mut self, lo: u64, c: usize) {
         debug_assert_eq!(lo % 30, 0, "lo must be a multiple of 30");
-        let template = get_presieve_7_11();
+        let Some(template) = get_presieve_template(c) else {
+            self.fill(lo, &[]);
+            return;
+        };
 
         // Bytes view of self.bits. W30_WORDS * 8 = 17480 bytes.
         let bits_bytes: &mut [u8] = unsafe {
@@ -591,19 +600,20 @@ impl WheelSieve30 {
         };
 
         // Offset within the template for this segment's starting number.
-        let off = ((lo % PRESIEVE_SPAN) / 30) as usize;
+        let span = (template.len() as u64) * 30;
+        let off = ((lo % span) / 30) as usize;
 
         // Tile the template over the W30_GROUPS (= 17476) valid bytes.
         let total = W30_GROUPS;
         let mut pos = 0;
         // First chunk (from `off` to end of template).
-        let first = (PRESIEVE_BYTES - off).min(total);
+        let first = (template.len() - off).min(total);
         bits_bytes[..first].copy_from_slice(&template[off..off + first]);
         pos += first;
         // Full templates.
-        while pos + PRESIEVE_BYTES <= total {
-            bits_bytes[pos..pos + PRESIEVE_BYTES].copy_from_slice(template);
-            pos += PRESIEVE_BYTES;
+        while pos + template.len() <= total {
+            bits_bytes[pos..pos + template.len()].copy_from_slice(template);
+            pos += template.len();
         }
         // Tail.
         if pos < total {
@@ -617,11 +627,16 @@ impl WheelSieve30 {
             bits_bytes[b] = 0;
         }
 
-        // Integer 1 is coprime to {7, 11} so the template marks it set; clear
-        // it explicitly when `lo == 0` since 1 is not prime.
+        // Integer 1 is coprime to the tiny-prime prefix so the template marks
+        // it set; clear it explicitly when `lo == 0` since 1 is not prime.
         if lo == 0 {
             self.bits[0] &= !1u64;
         }
+    }
+
+    #[inline]
+    pub fn supports_presieved(c: usize) -> bool {
+        (4..=8).contains(&c)
     }
 
     /// Sets the bit for integer 1 (bit_idx = 0) — used by the φ-sieve to
@@ -1523,6 +1538,43 @@ mod tests {
                 nj_ref = nj_ref_after;
                 nm_new = nm_new_after;
                 nj_new = nj_new_after;
+            }
+        }
+    }
+
+    #[test]
+    fn fill_presieved_matches_explicit_tiny_crossoff() {
+        fn tiny_state(primes: &[u64], lo: u64) -> Vec<(u64, u64)> {
+            primes.iter().map(|&p| {
+                let k0 = (lo + p - 1) / p;
+                let k1 = wheel30_next_k(k0);
+                (p, k1 * p)
+            }).collect()
+        }
+
+        let tiny = [7u64, 11, 13, 17, 19];
+        let los = [
+            0u64,
+            30,
+            60,
+            W30_SEG as u64,
+            (W30_SEG as u64) * 3,
+            1_000_000_020,
+        ];
+
+        for c in 4..=8 {
+            let primes = &tiny[..c - 3];
+            for &lo in &los {
+                let mut explicit = WheelSieve30::new();
+                explicit.fill(lo, &tiny_state(primes, lo));
+
+                let mut presieved = WheelSieve30::new();
+                presieved.fill_presieved(lo, c);
+
+                assert_eq!(
+                    explicit.bits, presieved.bits,
+                    "presieve mismatch for c={c}, lo={lo}",
+                );
             }
         }
     }

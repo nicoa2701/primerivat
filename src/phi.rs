@@ -75,6 +75,10 @@ type FastMemoMap = HashMap<u128, u128, BuildHasherDefault<U128Hasher>>;
 /// Utilise le hasher U128Hasher (beaucoup plus rapide que SipHash sur ces clés).
 pub type PhiMemoMap = HashMap<(u128, usize), u128, BuildHasherDefault<U128Hasher>>;
 
+/// Largest tiny-prime prefix handled directly by phi_tiny-style closed forms.
+/// primecount uses 8 for normal DR input sizes: {2,3,5,7,11,13,17,19}.
+pub const PHI_TINY_MAX_A: usize = 8;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]
 struct QuotientPlateau {
@@ -320,7 +324,7 @@ fn phi_small_a(n: u128, a: usize, primes: &[u64]) -> Option<u128> {
     if a == 0 {
         return Some(n);
     }
-    if a > 5 || a > primes.len() {
+    if a > PHI_TINY_MAX_A || a > primes.len() {
         return None;
     }
 
@@ -460,8 +464,8 @@ fn collect_phi_leaf_queries_rec(
     if n <= cbrt_x {
         return;
     }
-    // phi_small_a handles a ≤ 5 without any π lookup.
-    if a <= 5 || a > primes.len() {
+    // phi_small_a handles tiny-a values without any π lookup.
+    if a <= PHI_TINY_MAX_A || a > primes.len() {
         return;
     }
 
@@ -554,7 +558,7 @@ pub fn build_phi_small(cbrt_x: u64, seed_primes: &[u64]) -> Vec<u32> {
 ///
 /// With the phi_table, every sub-problem with x ≤ ∛x is answered instantly,
 /// dramatically reducing the recursion tree compared to the plain Legendre
-/// recursion (which would recurse down to a ≤ 5 even for tiny x values).
+/// recursion (which would recurse down to the tiny-a cutoff even for small x).
 pub fn phi_fast(
     x: u128,
     a: usize,
@@ -576,7 +580,7 @@ pub fn phi_fast(
         return phi_table[a * stride + x as usize] as u128;
     }
 
-    // Inclusion-exclusion formula for a ≤ 5 (no π call needed).
+    // Inclusion-exclusion formula for tiny a (no π call needed).
     if let Some(value) = phi_small_a(x, a, primes) {
         return value;
     }
@@ -642,7 +646,7 @@ pub fn phi_fast_v3(
         return phi_table[a * stride + x as usize] as u128;
     }
 
-    // ── Closed-form for a ≤ 5 ───────────────────────────────────────────────
+    // ── Closed-form for tiny a ──────────────────────────────────────────────
     if let Some(value) = phi_small_a(x, a, primes) {
         return value;
     }
@@ -713,7 +717,7 @@ pub fn collect_phi_leaf_queries_flat(
     if n <= cbrt_x {
         return;
     }
-    if a <= 5 || a > primes.len() {
+    if a <= PHI_TINY_MAX_A || a > primes.len() {
         return;
     }
     let pa = primes[a - 1] as u128;
@@ -787,7 +791,7 @@ pub fn phi_fast_flat(
         let stride = cbrt_x as usize + 1;
         return phi_table[a * stride + n as usize] as u128;
     }
-    // Closed-form for a ≤ 5 (no π lookup needed).
+    // Closed-form for tiny a (no π lookup needed).
     if let Some(value) = phi_small_a(n, a, primes) {
         return value;
     }
@@ -938,11 +942,11 @@ mod tests {
     }
 
     #[test]
-    fn phi_small_a_matches_recursive_reference_up_to_five() {
+    fn phi_small_a_matches_recursive_reference_up_to_eight() {
         let primes = vec![2u64, 3, 5, 7, 11, 13, 17, 19, 23, 29];
         let pi = make_pi(&primes);
 
-        for a in 0..=5 {
+        for a in 0..=PHI_TINY_MAX_A {
             for x in [1u128, 10, 100, 1_000, 10_000, 100_000] {
                 let mut memo = HashMap::new();
                 let recursive = phi(x, a, &primes, &pi, &mut memo);
@@ -1046,10 +1050,10 @@ pub fn phi_tiny(n: u128, a: usize, primes: &[u64]) -> Option<u128> {
 /// # Parameters
 /// - `x` : the prime-counting argument
 /// - `y` : = ∛x (the sieve limit)
-/// - `c` : number of tiny primes used in φ_tiny (must be ≤ 5)
+/// - `c` : number of tiny primes used in φ_tiny (must be ≤ PHI_TINY_MAX_A)
 /// - `primes` : all primes ≤ y in ascending order
 pub fn s1_ordinary(x: u128, y: u64, c: usize, primes: &[u64]) -> i128 {
-    debug_assert!(c <= 5);
+    debug_assert!(c <= PHI_TINY_MAX_A);
     // Base: m = 1, μ(1) = +1
     let base = phi_small_a(x, c, primes).unwrap_or(x) as i128;
     let mut sum = base;
