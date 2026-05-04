@@ -394,6 +394,41 @@ fn run_dr_meissel4_profile(x: u128, _threads: usize) {
             fmt_thousands(profile.n_prefix_fills as u128),
             fmt_thousands(profile.n_bulk_active_primes_sum as u128),
         );
+        if profile.rest_bulk_detail.enabled {
+            let rb = &profile.rest_bulk_detail;
+            let avg_active = if rb.segments > 0 {
+                rb.target_sum as f64 / rb.segments as f64
+            } else { 0.0 };
+            println!("    ┌─ rest_bulk fine profile (RIVAT3_REST_BULK_PROFILE=1) ─");
+            println!(
+                "    │  active scan {:>9.1} ms   state init {:>9.1} ms   xoff {:>9.1} ms",
+                rb.active_scan_ns as f64 / 1e6,
+                rb.state_init_ns as f64 / 1e6,
+                rb.xoff_ns as f64 / 1e6,
+            );
+            println!(
+                "    │  segments={}  xoff_calls={}  state_inits={}  avg_active/segment={:.1}",
+                fmt_thousands(rb.segments as u128),
+                fmt_thousands(rb.xoff_calls as u128),
+                fmt_thousands(rb.state_inits as u128),
+                avg_active,
+            );
+            let labels = ["p<=W/4", "p<=W/2", "p<=W", "p<=2W", "p>2W"];
+            for (i, label) in labels.iter().enumerate() {
+                let calls = rb.bin_calls[i];
+                if calls == 0 { continue; }
+                let ns = rb.bin_ns[i];
+                let ns_per_call = ns as f64 / calls as f64;
+                println!(
+                    "    │  {:>6}: {:>9.1} ms  calls={}  {:>6.1} ns/call",
+                    label,
+                    ns as f64 / 1e6,
+                    fmt_thousands(calls as u128),
+                    ns_per_call,
+                );
+            }
+            println!("    └─");
+        }
     }
 
     // ── Per-band breakdown (top 10 by total CPU + slowest ratio) ─────────────

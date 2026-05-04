@@ -25,6 +25,9 @@ pub struct HardProfile {
     pub rest_plain_ns: u64,
     /// Bulk cross-off bi ∈ [b_ext, bulk_end) (includes bucket advance).
     pub rest_bulk_ns: u64,
+    /// Optional fine-grained rest_bulk timings, populated when
+    /// `RIVAT3_REST_BULK_PROFILE=1`.
+    pub rest_bulk_detail: RestBulkProfile,
 
     // ── Tail (split) ──────────────────────────────────────────────────────
     /// `fill_prefix_counts` + seed_below_lo bsearch (lazy per segment).
@@ -60,6 +63,22 @@ pub struct HardProfile {
     /// load-balancing diagnostics. Empty `Vec` when not relevant.
     pub per_band: Vec<BandProfile>,
 }
+
+#[derive(Default, Clone, Copy, Debug)]
+pub struct RestBulkProfile {
+    pub enabled: bool,
+    pub active_scan_ns: u64,
+    pub state_init_ns: u64,
+    pub xoff_ns: u64,
+    pub xoff_calls: u64,
+    pub state_inits: u64,
+    pub segments: u64,
+    pub target_sum: u64,
+    pub bin_ns: [u64; REST_BULK_BINS],
+    pub bin_calls: [u64; REST_BULK_BINS],
+}
+
+pub const REST_BULK_BINS: usize = 5;
 
 /// Per-band profile entry. CPU time and counters captured by one Rayon
 /// worker for a single band (segments `[band_lo, band_hi)`).
@@ -569,6 +588,9 @@ pub fn s2_hard_sieve_par(
         bi_main_leaf_ns: u64,
         rest_plain_ns: u64,
         rest_bulk_ns: u64,
+        rest_bulk_active_scan_ns: u64,
+        rest_bulk_state_init_ns: u64,
+        rest_bulk_xoff_ns: u64,
         tail_prefix_ns: u64,
         tail_ext_ns: u64,
         tail_p2_ns: u64,
@@ -577,6 +599,12 @@ pub fn s2_hard_sieve_par(
         n_ext_emitted: u64,
         n_prefix_fills: u64,
         n_bulk_active_sum: u64,
+        n_bulk_xoff_calls: u64,
+        n_bulk_state_inits: u64,
+        n_bulk_segments: u64,
+        n_bulk_target_sum: u64,
+        bulk_bin_ns: [u64; REST_BULK_BINS],
+        bulk_bin_calls: [u64; REST_BULK_BINS],
     }
 
     // Heavy-band selection for the 2-pass deferred-tail-ext path. Heuristic
@@ -596,6 +624,10 @@ pub fn s2_hard_sieve_par(
     // Bucket kept opt-in for future experiments (compact `pb_data`, alternate
     // recompute strategy, etc.). `--bucket-bulk` / `RIVAT3_BUCKET_BULK=1`.
     let bucket_bulk = crate::parameters::bucket_bulk();
+    let rest_bulk_profile = std::env::var("RIVAT3_REST_BULK_PROFILE")
+        .ok()
+        .map(|s| !s.is_empty() && s != "0" && s.to_lowercase() != "false")
+        .unwrap_or(false);
 
     // Per-band easy iterator init, hoisted out of the per-band closure so the
     // pass-2 deferred-tail-ext replay can reuse it for heavy bands. Captures
@@ -753,6 +785,21 @@ pub fn s2_hard_sieve_par(
         }
         eprintln!("└─");
     }
+
+    let rest_bulk_bin_for_p = |p: u64| -> usize {
+        let w = W30_SEG as u64;
+        if p <= w / 4 {
+            0
+        } else if p <= w / 2 {
+            1
+        } else if p <= w {
+            2
+        } else if p <= 2 * w {
+            3
+        } else {
+            4
+        }
+    };
 
     // Process one work unit. Phase 2 generalisation: a "chunk" is either a
     // whole band (chunk_lo = band_lo, chunk_hi = band_hi) or a sub-range of a
@@ -1063,6 +1110,7 @@ pub fn s2_hard_sieve_par(
                     }
                 } else {
                     // ── Linear sweep (production path, the historical bulk loop) ──
+                    let t_active_scan = Instant::now();
                     let target_end: usize = if lo < y {
                         n_all - b_ext
                     } else {
@@ -1073,8 +1121,16 @@ pub fn s2_hard_sieve_par(
                         }
                         bulk_active_end - b_ext
                     };
+                    if rest_bulk_profile {
+                        stats.rest_bulk_active_scan_ns +=
+                            t_active_scan.elapsed().as_nanos() as u64;
+                        stats.n_bulk_segments += 1;
+                        stats.n_bulk_target_sum += target_end as u64;
+                    }
                     // Initialise persistent state for primes that just became
                     // active this segment (paid once per prime per band).
+                    let t_state_init = Instant::now();
+                    let init_start = bulk_state_valid_end;
                     while bulk_state_valid_end < target_end {
                         let k = bulk_state_valid_end;
                         let p = primes[c + b_ext + k] as u64;
@@ -1084,18 +1140,52 @@ pub fn s2_hard_sieve_par(
                         bulk_next_j[k] = W30_IDX[(k1 % 30) as usize];
                         bulk_state_valid_end += 1;
                     }
+                    if rest_bulk_profile {
+                        stats.rest_bulk_state_init_ns +=
+                            t_state_init.elapsed().as_nanos() as u64;
+                        stats.n_bulk_state_inits +=
+                            (bulk_state_valid_end - init_start) as u64;
+                    }
                     // Cross-off with incremental state: no per-call 64-bit div.
                     // NB: `cross_off_pd_from_state_unrolled` (Phase 3) exists in
                     // segment.rs and is bit/state-exact, but switching to it
                     // here regressed `rest_bulk_xoff` by ~25 % at 1e15 α=1.
-                    for k in 0..target_end {
-                        let p = primes[c + b_ext + k] as u64;
-                        let (nm, nj) = sieve.cross_off_pd_from_state(
-                            lo, p, &pb_data[b_ext + k],
-                            bulk_next_m[k], bulk_next_j[k],
-                        );
-                        bulk_next_m[k] = nm;
-                        bulk_next_j[k] = nj;
+                    if rest_bulk_profile {
+                        let t_xoff = Instant::now();
+                        let mut k = 0usize;
+                        while k < target_end {
+                            let p0 = primes[c + b_ext + k] as u64;
+                            let bin = rest_bulk_bin_for_p(p0);
+                            let start = k;
+                            let t_bin = Instant::now();
+                            while k < target_end {
+                                let p = primes[c + b_ext + k] as u64;
+                                if rest_bulk_bin_for_p(p) != bin {
+                                    break;
+                                }
+                                let (nm, nj) = sieve.cross_off_pd_from_state(
+                                    lo, p, &pb_data[b_ext + k],
+                                    bulk_next_m[k], bulk_next_j[k],
+                                );
+                                bulk_next_m[k] = nm;
+                                bulk_next_j[k] = nj;
+                                k += 1;
+                            }
+                            stats.bulk_bin_ns[bin] += t_bin.elapsed().as_nanos() as u64;
+                            stats.bulk_bin_calls[bin] += (k - start) as u64;
+                        }
+                        stats.rest_bulk_xoff_ns += t_xoff.elapsed().as_nanos() as u64;
+                        stats.n_bulk_xoff_calls += target_end as u64;
+                    } else {
+                        for k in 0..target_end {
+                            let p = primes[c + b_ext + k] as u64;
+                            let (nm, nj) = sieve.cross_off_pd_from_state(
+                                lo, p, &pb_data[b_ext + k],
+                                bulk_next_m[k], bulk_next_j[k],
+                            );
+                            bulk_next_m[k] = nm;
+                            bulk_next_j[k] = nj;
+                        }
                     }
                 }
                 stats.rest_bulk_ns += t_bulk.elapsed().as_nanos() as u64;
@@ -1657,6 +1747,9 @@ pub fn s2_hard_sieve_par(
             s.bi_main_leaf_ns   += cs.bi_main_leaf_ns;
             s.rest_plain_ns     += cs.rest_plain_ns;
             s.rest_bulk_ns      += cs.rest_bulk_ns;
+            s.rest_bulk_active_scan_ns += cs.rest_bulk_active_scan_ns;
+            s.rest_bulk_state_init_ns  += cs.rest_bulk_state_init_ns;
+            s.rest_bulk_xoff_ns        += cs.rest_bulk_xoff_ns;
             s.tail_prefix_ns    += cs.tail_prefix_ns;
             s.tail_ext_ns       += cs.tail_ext_ns;
             s.tail_p2_ns        += cs.tail_p2_ns;
@@ -1665,12 +1758,23 @@ pub fn s2_hard_sieve_par(
             s.n_ext_emitted     += cs.n_ext_emitted;
             s.n_prefix_fills    += cs.n_prefix_fills;
             s.n_bulk_active_sum += cs.n_bulk_active_sum;
+            s.n_bulk_xoff_calls += cs.n_bulk_xoff_calls;
+            s.n_bulk_state_inits += cs.n_bulk_state_inits;
+            s.n_bulk_segments += cs.n_bulk_segments;
+            s.n_bulk_target_sum += cs.n_bulk_target_sum;
+            for i in 0..REST_BULK_BINS {
+                s.bulk_bin_ns[i] += cs.bulk_bin_ns[i];
+                s.bulk_bin_calls[i] += cs.bulk_bin_calls[i];
+            }
         }
         agg.fill_ns           += s.fill_ns;
         agg.bi_main_ns        += s.bi_main_ns;
         agg.bi_main_leaf_ns   += s.bi_main_leaf_ns;
         agg.rest_plain_ns     += s.rest_plain_ns;
         agg.rest_bulk_ns      += s.rest_bulk_ns;
+        agg.rest_bulk_active_scan_ns += s.rest_bulk_active_scan_ns;
+        agg.rest_bulk_state_init_ns  += s.rest_bulk_state_init_ns;
+        agg.rest_bulk_xoff_ns        += s.rest_bulk_xoff_ns;
         agg.tail_prefix_ns    += s.tail_prefix_ns;
         agg.tail_ext_ns       += s.tail_ext_ns;
         agg.tail_p2_ns        += s.tail_p2_ns;
@@ -1679,6 +1783,14 @@ pub fn s2_hard_sieve_par(
         agg.n_ext_emitted     += s.n_ext_emitted;
         agg.n_prefix_fills    += s.n_prefix_fills;
         agg.n_bulk_active_sum += s.n_bulk_active_sum;
+        agg.n_bulk_xoff_calls += s.n_bulk_xoff_calls;
+        agg.n_bulk_state_inits += s.n_bulk_state_inits;
+        agg.n_bulk_segments += s.n_bulk_segments;
+        agg.n_bulk_target_sum += s.n_bulk_target_sum;
+        for i in 0..REST_BULK_BINS {
+            agg.bulk_bin_ns[i] += s.bulk_bin_ns[i];
+            agg.bulk_bin_calls[i] += s.bulk_bin_calls[i];
+        }
 
         per_band.push(BandProfile {
             band_t: t,
@@ -1759,6 +1871,18 @@ pub fn s2_hard_sieve_par(
         sweep_bi_main_leaf_ns:     agg.bi_main_leaf_ns,
         rest_plain_ns:             agg.rest_plain_ns,
         rest_bulk_ns:              agg.rest_bulk_ns,
+        rest_bulk_detail: RestBulkProfile {
+            enabled: rest_bulk_profile,
+            active_scan_ns: agg.rest_bulk_active_scan_ns,
+            state_init_ns: agg.rest_bulk_state_init_ns,
+            xoff_ns: agg.rest_bulk_xoff_ns,
+            xoff_calls: agg.n_bulk_xoff_calls,
+            state_inits: agg.n_bulk_state_inits,
+            segments: agg.n_bulk_segments,
+            target_sum: agg.n_bulk_target_sum,
+            bin_ns: agg.bulk_bin_ns,
+            bin_calls: agg.bulk_bin_calls,
+        },
         tail_prefix_build_ns:      agg.tail_prefix_ns,
         tail_ext_emit_ns:          agg.tail_ext_ns,
         tail_p2_emit_ns:           agg.tail_p2_ns,
