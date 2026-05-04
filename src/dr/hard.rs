@@ -637,14 +637,20 @@ pub fn s2_hard_sieve_par(
         bulk_bin_calls: [u64; REST_BULK_BINS],
     }
 
-    // Heavy-band selection for the 2-pass deferred-tail-ext path. Heuristic
-    // (POC stage A): bands 0 + 1 only when the log-scale layout is active
-    // (= α=2 clamp regime). Outside α=2, `use_log_scale = false` so the mask
-    // is empty and pass 2 is a no-op — code reverts to single-pass behaviour
-    // bit-for-bit. Disabled entirely via `--no-deferred-tail-ext`.
+    // Heavy-band selection for the 2-pass deferred-tail-ext path. Default
+    // keeps the historical mask (bands 0 + 1) when the log-scale layout is
+    // active (= α=2 clamp regime). `RIVAT3_DEFERRED_TAIL_EXT_BANDS=4` extends
+    // this to bands 0..3, useful for the single-segment tail_ext hot spots
+    // exposed by `RIVAT3_WORK_ITEM_PROFILE=1` at 1e18 on 9700X. Outside α=2,
+    // `use_log_scale = false` so the mask is empty and pass 2 is a no-op.
+    // Disabled entirely via `--no-deferred-tail-ext`.
     let defer_enabled = !crate::parameters::no_deferred_tail_ext();
+    let deferred_tail_ext_bands = std::env::var("RIVAT3_DEFERRED_TAIL_EXT_BANDS")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(2);
     let is_heavy = |t: usize| -> bool {
-        defer_enabled && use_log_scale && t < 2
+        defer_enabled && use_log_scale && t < deferred_tail_ext_bands
     };
 
     // Bucket-sieve dispatch for `rest_bulk_xoff` (cible #1). Default OFF
@@ -1633,7 +1639,7 @@ pub fn s2_hard_sieve_par(
                     chunk_hi,
                     walker_start_n,
                     p2_min_rank,
-                    is_heavy: false,
+                    is_heavy: n_segs == 1 && is_heavy(t),
                 });
                 prev = chunk_hi;
             }
