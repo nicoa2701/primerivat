@@ -98,6 +98,106 @@ pub(crate) fn p2_streaming(
     sum.max(0) as u128
 }
 
+/// Parallel standalone P2 probe using independent q-segments. It intentionally
+/// sieves the q-range twice (once for segment prime counts, once for queries)
+/// so each query segment can be computed independently and compared against the
+/// fused P2 path before any production replacement is attempted.
+pub(crate) fn p2_segmented_parallel_probe(
+    x: u128,
+    y: u64,
+    sqrt_x: u64,
+    a: usize,
+    seed_primes: &[u64],
+    s2_primes: &crate::prime_bitset::PrimeBitset,
+) -> u128 {
+    use crate::segment::{init_small_primes, SegSieve, SEG};
+    use rayon::prelude::*;
+
+    if y >= sqrt_x || s2_primes.total() == 0 {
+        return 0;
+    }
+
+    let z = (x / y as u128) as u64;
+    if z <= sqrt_x {
+        return 0;
+    }
+
+    let seg_size = SEG as u64;
+    let first_seg_lo = ((sqrt_x + 1) / seg_size) * seg_size;
+    let n_segments = ((z - first_seg_lo) / seg_size + 1) as usize;
+    let pi_sqrt = (a + s2_primes.total()) as i128;
+
+    let segment_count = |seg_idx: usize| -> u64 {
+        let seg_lo = first_seg_lo + seg_idx as u64 * seg_size;
+        let seg_hi = (seg_lo + seg_size - 1).min(z);
+        let mut sieve = SegSieve::new();
+        let state = init_small_primes(seed_primes, seg_lo);
+        sieve.fill(seg_lo, &state);
+        sieve
+            .iter_primes(seg_lo)
+            .filter(|&p| p > sqrt_x && p <= seg_hi)
+            .count() as u64
+    };
+
+    let counts: Vec<u64> = (0..n_segments)
+        .into_par_iter()
+        .map(segment_count)
+        .collect();
+
+    let mut prefix = vec![0u64; n_segments + 1];
+    for i in 0..n_segments {
+        prefix[i + 1] = prefix[i] + counts[i];
+    }
+
+    let segment_sum = |seg_idx: usize| -> i128 {
+        let seg_lo = first_seg_lo + seg_idx as u64 * seg_size;
+        let seg_hi = (seg_lo + seg_size - 1).min(z);
+        let mut sieve = SegSieve::new();
+        let state = init_small_primes(seed_primes, seg_lo);
+        sieve.fill(seg_lo, &state);
+
+        let mut pref = vec![0u32; SEG / 64 + 1];
+        sieve.fill_prefix_counts(&mut pref);
+        let sqrt_local = if sqrt_x >= seg_lo && sqrt_x <= seg_hi {
+            Some((sqrt_x - seg_lo) as usize)
+        } else {
+            None
+        };
+        let sqrt_count_in_seg = sqrt_local
+            .map(|local| sieve.count_primes_upto(&pref, local) as i128)
+            .unwrap_or(0);
+
+        let mut local_sum = 0i128;
+        let p_start = ((x / seg_lo.max(1) as u128) as u64).min(sqrt_x);
+        let mut walker = s2_primes.walker_at(p_start);
+        while !walker.is_done() {
+            let p = walker.p() as u64;
+            let q = (x / p as u128) as u64;
+            if q < seg_lo {
+                walker.advance();
+                continue;
+            }
+            if q > seg_hi {
+                break;
+            }
+            let local = (q - seg_lo) as usize;
+            let count_to_q = sieve.count_primes_upto(&pref, local) as i128
+                - if q > sqrt_x { sqrt_count_in_seg } else { 0 };
+            let pi_q = pi_sqrt + prefix[seg_idx] as i128 + count_to_q;
+            let k = (a + walker.rank()) as i128;
+            local_sum += pi_q - k;
+            walker.advance();
+        }
+        local_sum
+    };
+
+    let sum: i128 = (0..n_segments)
+        .into_par_iter()
+        .map(segment_sum)
+        .sum();
+    sum.max(0) as u128
+}
+
 /// Returns `true` when `prime_pi_dr_meissel_v4(x)` would short-circuit to
 /// [`crate::baseline::prime_pi`] instead of running the DR sweep. The
 /// guard is `a = π(α·∛x) ≤ C`.
@@ -228,6 +328,17 @@ pub fn prime_pi_dr_meissel_v4_timed(x: u128) -> (u128, [std::time::Duration; 5],
             t_p2.elapsed().as_secs_f64(),
         );
         assert_eq!(p2_split, p2, "split P2 mismatch");
+    }
+    if std::env::var("RIVAT3_SPLIT_P2_PAR_CHECK").is_ok() {
+        let t_p2 = Instant::now();
+        let p2_split = p2_segmented_parallel_probe(x, y, sqrt_x, a, &seed_primes, &s2_primes);
+        eprintln!(
+            "[split-p2-par-check] fused={} split_par={} elapsed={:.3}s",
+            p2,
+            p2_split,
+            t_p2.elapsed().as_secs_f64(),
+        );
+        assert_eq!(p2_split, p2, "parallel split P2 mismatch");
     }
 
     let phi_x_a = (s1 + s2_hard) as u128;
