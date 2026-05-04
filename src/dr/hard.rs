@@ -1716,9 +1716,11 @@ pub fn s2_hard_sieve_par(
                 let pl_upper = (x / (pb * lo_start as u128)) as u64;
                 primes[b..a].partition_point(|&p| p <= pl_upper)
             };
-            cost += nonclamp_cnt.min(upper_cnt) as u128;
+            let clamped = upper_cnt.saturating_sub(nonclamp_cnt);
+            let emit_cnt = nonclamp_cnt.min(upper_cnt);
+            cost += (emit_cnt as u128) * 24 + clamped as u128;
         }
-        (cost * 24).min(u64::MAX as u128) as u64
+        cost.min(u64::MAX as u128) as u64
     };
 
     let compute_split_tail_ext = || -> i128 {
