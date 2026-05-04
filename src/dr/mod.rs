@@ -8,6 +8,96 @@ fn tiny_c() -> usize {
     crate::parameters::tiny_c()
 }
 
+/// Streaming standalone P2 implementation, modeled after primecount's
+/// separated P2 pass. This is currently used as an opt-in correctness probe
+/// before we consider removing the fused P2 queries from `s2_hard`.
+pub(crate) fn p2_streaming(
+    x: u128,
+    y: u64,
+    sqrt_x: u64,
+    a: usize,
+    seed_primes: &[u64],
+    s2_primes: &crate::prime_bitset::PrimeBitset,
+) -> u128 {
+    use crate::segment::{advance_small_primes, init_small_primes, SegSieve, SEG};
+
+    if y >= sqrt_x || s2_primes.total() == 0 {
+        return 0;
+    }
+
+    let mut walker = s2_primes.walker_at(sqrt_x);
+    if walker.is_done() {
+        return 0;
+    }
+
+    let mut pi_count: i128 = (a + s2_primes.total()) as i128;
+    let mut sum: i128 = 0;
+
+    let mut p = walker.p() as u64;
+    let mut rank = walker.rank();
+    let mut q = (x / p as u128) as u64;
+
+    // Very first queries can land at sqrt_x exactly; those are already covered
+    // by `pi_count = π(sqrt_x)`.
+    while !walker.is_done() && q <= sqrt_x {
+        let k = (a + rank) as i128;
+        sum += pi_count - k;
+        walker.advance();
+        if walker.is_done() {
+            return sum.max(0) as u128;
+        }
+        p = walker.p() as u64;
+        rank = walker.rank();
+        q = (x / p as u128) as u64;
+    }
+
+    let z = (x / y as u128) as u64;
+    let mut seg_lo = ((sqrt_x + 1) / SEG as u64) * SEG as u64;
+    let mut sieve = SegSieve::new();
+    let mut state = init_small_primes(seed_primes, seg_lo);
+
+    while !walker.is_done() && seg_lo <= z {
+        let seg_hi = seg_lo + SEG as u64 - 1;
+        sieve.fill(seg_lo, &state);
+
+        let mut iter = sieve.iter_primes(seg_lo)
+            .filter(|&prime| prime > sqrt_x)
+            .peekable();
+
+        while !walker.is_done() && q <= seg_hi {
+            while let Some(&prime) = iter.peek() {
+                if prime > q {
+                    break;
+                }
+                pi_count += 1;
+                iter.next();
+            }
+
+            let k = (a + rank) as i128;
+            sum += pi_count - k;
+
+            walker.advance();
+            if walker.is_done() {
+                break;
+            }
+            p = walker.p() as u64;
+            rank = walker.rank();
+            q = (x / p as u128) as u64;
+        }
+
+        // Bring π up to the end of this segment before moving on.
+        for _ in iter {
+            pi_count += 1;
+        }
+
+        let next = seg_lo + SEG as u64;
+        advance_small_primes(&mut state, next);
+        seg_lo = next;
+    }
+
+    sum.max(0) as u128
+}
+
 /// Returns `true` when `prime_pi_dr_meissel_v4(x)` would short-circuit to
 /// [`crate::baseline::prime_pi`] instead of running the DR sweep. The
 /// guard is `a = π(α·∛x) ≤ C`.
@@ -127,6 +217,18 @@ pub fn prime_pi_dr_meissel_v4_timed(x: u128) -> (u128, [std::time::Duration; 5],
     let t2 = Instant::now();
     let (s2_hard, p2, profile) = hard::s2_hard_sieve_par(x, y, z, c, b_max, a, &seed_primes, &s2_primes);
     times[2] = t2.elapsed();
+
+    if std::env::var("RIVAT3_SPLIT_P2_CHECK").is_ok() {
+        let t_p2 = Instant::now();
+        let p2_split = p2_streaming(x, y, sqrt_x, a, &seed_primes, &s2_primes);
+        eprintln!(
+            "[split-p2-check] fused={} split={} elapsed={:.3}s",
+            p2,
+            p2_split,
+            t_p2.elapsed().as_secs_f64(),
+        );
+        assert_eq!(p2_split, p2, "split P2 mismatch");
+    }
 
     let phi_x_a = (s1 + s2_hard) as u128;
     let result = phi_x_a + a as u128 - 1 - p2;
