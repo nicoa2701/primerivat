@@ -1660,42 +1660,72 @@ pub fn s2_hard_sieve_par(
         )
     };
 
+    let compute_tail_ext_range = |ei_lo: usize, ei_hi: usize| -> i128 {
+        let mut range_sum: i128 = 0;
+        for ei in ei_lo..ei_hi {
+            let bi = n_hard + ei;
+            let b = bi + c + 1;
+            if b >= a || b < 2 {
+                continue;
+            }
+            let pb = primes[b - 1] as u128;
+            let pbm1 = primes[b - 2] as u128;
+            let pl_clamp_threshold = (x / (pb * pbm1)) as u64;
+            let nonclamp_cnt = primes[b..a]
+                .partition_point(|&p| p <= pl_clamp_threshold);
+            let upper_cnt = if lo_start == 0 {
+                a - b
+            } else {
+                let pl_upper = (x / (pb * lo_start as u128)) as u64;
+                primes[b..a].partition_point(|&p| p <= pl_upper)
+            };
+            let clamped = upper_cnt.saturating_sub(nonclamp_cnt) as i128;
+            let emit_cnt = nonclamp_cnt.min(upper_cnt);
+            let mut sum = clamped;
+            let b_minus_2 = (b as i128) - 2;
+            for &pl in &primes[b..b + emit_cnt] {
+                let n = (x / (pb * pl as u128)) as u64;
+                let pi_n = if n <= y {
+                    primes.partition_point(|&p| p <= n)
+                } else {
+                    a + s2_primes.count_le(n)
+                } as i128;
+                sum += pi_n - b_minus_2;
+            }
+            range_sum += sum;
+        }
+        range_sum
+    };
+
+    let tail_ext_range_cost = |ei_lo: usize, ei_hi: usize| -> u64 {
+        let mut cost: u128 = 0;
+        for ei in ei_lo..ei_hi {
+            let bi = n_hard + ei;
+            let b = bi + c + 1;
+            if b >= a || b < 2 {
+                continue;
+            }
+            let pb = primes[b - 1] as u128;
+            let pbm1 = primes[b - 2] as u128;
+            let pl_clamp_threshold = (x / (pb * pbm1)) as u64;
+            let nonclamp_cnt = primes[b..a]
+                .partition_point(|&p| p <= pl_clamp_threshold);
+            let upper_cnt = if lo_start == 0 {
+                a - b
+            } else {
+                let pl_upper = (x / (pb * lo_start as u128)) as u64;
+                primes[b..a].partition_point(|&p| p <= pl_upper)
+            };
+            cost += nonclamp_cnt.min(upper_cnt) as u128;
+        }
+        (cost * 24).min(u64::MAX as u128) as u64
+    };
+
     let compute_split_tail_ext = || -> i128 {
         let t_split = Instant::now();
         let split_ext: i128 = (far_easy_start..n_easy)
             .into_par_iter()
-            .map(|ei| {
-                let bi = n_hard + ei;
-                let b = bi + c + 1;
-                if b >= a || b < 2 {
-                    return 0i128;
-                }
-                let pb = primes[b - 1] as u128;
-                let pbm1 = primes[b - 2] as u128;
-                let pl_clamp_threshold = (x / (pb * pbm1)) as u64;
-                let nonclamp_cnt = primes[b..a]
-                    .partition_point(|&p| p <= pl_clamp_threshold);
-                let upper_cnt = if lo_start == 0 {
-                    a - b
-                } else {
-                    let pl_upper = (x / (pb * lo_start as u128)) as u64;
-                    primes[b..a].partition_point(|&p| p <= pl_upper)
-                };
-                let clamped = upper_cnt.saturating_sub(nonclamp_cnt) as i128;
-                let emit_cnt = nonclamp_cnt.min(upper_cnt);
-                let mut sum = clamped;
-                let b_minus_2 = (b as i128) - 2;
-                for &pl in &primes[b..b + emit_cnt] {
-                    let n = (x / (pb * pl as u128)) as u64;
-                    let pi_n = if n <= y {
-                        primes.partition_point(|&p| p <= n)
-                    } else {
-                        a + s2_primes.count_le(n)
-                    } as i128;
-                    sum += pi_n - b_minus_2;
-                }
-                sum
-            })
+            .map(|ei| compute_tail_ext_range(ei, ei + 1))
             .sum();
         if tail_ext_split_enabled {
             eprintln!(
@@ -1758,8 +1788,112 @@ pub fn s2_hard_sieve_par(
     };
 
     let (chunk_outputs, split_tail_ext) = if tail_ext_split_enabled {
-        let (chunk_outputs, split_ext) =
-            rayon::join(|| compute_chunk_outputs(), || compute_split_tail_ext());
+        use std::sync::Mutex;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        #[derive(Clone, Copy)]
+        struct TailItem {
+            ei_lo: usize,
+            ei_hi: usize,
+            cost: u64,
+        }
+
+        #[derive(Clone, Copy)]
+        enum MixedItem {
+            Sweep(usize),
+            Tail(usize),
+        }
+
+        let tail_chunk = std::env::var("RIVAT3_TAIL_EXT_EI_CHUNK")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .filter(|&v| v > 0)
+            .unwrap_or(8);
+        let mut tail_items: Vec<TailItem> = Vec::new();
+        let mut ei = far_easy_start;
+        while ei < n_easy {
+            let ei_hi = (ei + tail_chunk).min(n_easy);
+            let cost = tail_ext_range_cost(ei, ei_hi);
+            if cost > 0 {
+                tail_items.push(TailItem { ei_lo: ei, ei_hi, cost });
+            }
+            ei = ei_hi;
+        }
+
+        let mut mixed_items: Vec<MixedItem> =
+            Vec::with_capacity(n_items + tail_items.len());
+        mixed_items.extend((0..n_items).map(MixedItem::Sweep));
+        mixed_items.extend((0..tail_items.len()).map(MixedItem::Tail));
+        let mut mixed_order: Vec<usize> = (0..mixed_items.len()).collect();
+        mixed_order.sort_by(|&a, &b| {
+            let cost_a = match mixed_items[a] {
+                MixedItem::Sweep(i) => predicted_cost(&work_items[i]),
+                MixedItem::Tail(i) => tail_items[i].cost,
+            };
+            let cost_b = match mixed_items[b] {
+                MixedItem::Sweep(i) => predicted_cost(&work_items[i]),
+                MixedItem::Tail(i) => tail_items[i].cost,
+            };
+            cost_b.cmp(&cost_a)
+        });
+
+        let t_split = Instant::now();
+        let cursor = AtomicUsize::new(0);
+        let sweep_results: Vec<Mutex<Option<BandSweep>>> =
+            (0..n_items).map(|_| Mutex::new(None)).collect();
+        let tail_results: Vec<Mutex<Option<i128>>> =
+            (0..tail_items.len()).map(|_| Mutex::new(None)).collect();
+        let n_workers = rayon::current_num_threads().max(1);
+
+        rayon::scope(|s| {
+            let mixed_items = &mixed_items;
+            let mixed_order = &mixed_order;
+            let work_items = &work_items;
+            let tail_items = &tail_items;
+            let process_item = &process_item;
+            let compute_tail_ext_range = &compute_tail_ext_range;
+            let cursor = &cursor;
+            let sweep_results = &sweep_results;
+            let tail_results = &tail_results;
+            for _ in 0..n_workers {
+                s.spawn(move |_| {
+                    loop {
+                        let i = cursor.fetch_add(1, Ordering::Relaxed);
+                        if i >= mixed_order.len() { break; }
+                        match mixed_items[mixed_order[i]] {
+                            MixedItem::Sweep(item_idx) => {
+                                let r = process_item(&work_items[item_idx]);
+                                *sweep_results[item_idx].lock().unwrap() = Some(r);
+                            }
+                            MixedItem::Tail(tail_idx) => {
+                                let item = tail_items[tail_idx];
+                                let r = compute_tail_ext_range(item.ei_lo, item.ei_hi);
+                                *tail_results[tail_idx].lock().unwrap() = Some(r);
+                            }
+                        }
+                    }
+                });
+            }
+        });
+
+        let chunk_outputs: Vec<(usize, u64, BandSweep)> = sweep_results.into_iter().enumerate()
+            .map(|(i, m)| {
+                let sw = m.into_inner().unwrap()
+                    .expect("mixed workpool: every sweep slot must be filled exactly once");
+                (work_items[i].band_id, work_items[i].chunk_lo, sw)
+            })
+            .collect();
+        let split_ext: i128 = tail_results.into_iter()
+            .map(|m| m.into_inner().unwrap()
+                .expect("mixed workpool: every tail slot must be filled exactly once"))
+            .sum();
+        eprintln!(
+            "[tail-ext-split] contribution={} elapsed={:.3}s items={} chunk={}",
+            split_ext,
+            t_split.elapsed().as_secs_f64(),
+            tail_items.len(),
+            tail_chunk,
+        );
         (chunk_outputs, Some(split_ext))
     } else {
         (compute_chunk_outputs(), None)
