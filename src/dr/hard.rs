@@ -844,6 +844,32 @@ pub fn s2_hard_sieve_par(
             4
         }
     };
+    #[derive(Clone, Copy)]
+    enum RestBulkKernel {
+        Scalar,
+        Unrolled,
+        Wide,
+        Large,
+    }
+    let rest_bulk_kernel = match std::env::var("RIVAT3_REST_BULK_KERNEL")
+        .ok()
+        .as_deref()
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("unrolled") => RestBulkKernel::Unrolled,
+        Some("wide") => RestBulkKernel::Wide,
+        Some("large") => RestBulkKernel::Large,
+        _ => RestBulkKernel::Scalar,
+    };
+    let rest_bulk_use_unrolled = |bin: usize| -> bool {
+        match rest_bulk_kernel {
+            RestBulkKernel::Scalar => false,
+            RestBulkKernel::Unrolled => true,
+            RestBulkKernel::Wide => bin >= 2,
+            RestBulkKernel::Large => bin >= 3,
+        }
+    };
 
     // Process one work unit. Phase 2 generalisation: a "chunk" is either a
     // whole band (chunk_lo = band_lo, chunk_hi = band_hi) or a sub-range of a
@@ -1207,10 +1233,17 @@ pub fn s2_hard_sieve_par(
                                 if rest_bulk_bin_for_p(p) != bin {
                                     break;
                                 }
-                                let (nm, nj) = sieve.cross_off_pd_from_state(
-                                    lo, p, &pb_data[b_ext + k],
-                                    bulk_next_m[k], bulk_next_j[k],
-                                );
+                                let (nm, nj) = if rest_bulk_use_unrolled(bin) {
+                                    sieve.cross_off_pd_from_state_unrolled(
+                                        lo, p, &pb_data[b_ext + k],
+                                        bulk_next_m[k], bulk_next_j[k],
+                                    )
+                                } else {
+                                    sieve.cross_off_pd_from_state(
+                                        lo, p, &pb_data[b_ext + k],
+                                        bulk_next_m[k], bulk_next_j[k],
+                                    )
+                                };
                                 bulk_next_m[k] = nm;
                                 bulk_next_j[k] = nj;
                                 k += 1;
@@ -1223,10 +1256,18 @@ pub fn s2_hard_sieve_par(
                     } else {
                         for k in 0..target_end {
                             let p = primes[c + b_ext + k] as u64;
-                            let (nm, nj) = sieve.cross_off_pd_from_state(
-                                lo, p, &pb_data[b_ext + k],
-                                bulk_next_m[k], bulk_next_j[k],
-                            );
+                            let bin = rest_bulk_bin_for_p(p);
+                            let (nm, nj) = if rest_bulk_use_unrolled(bin) {
+                                sieve.cross_off_pd_from_state_unrolled(
+                                    lo, p, &pb_data[b_ext + k],
+                                    bulk_next_m[k], bulk_next_j[k],
+                                )
+                            } else {
+                                sieve.cross_off_pd_from_state(
+                                    lo, p, &pb_data[b_ext + k],
+                                    bulk_next_m[k], bulk_next_j[k],
+                                )
+                            };
                             bulk_next_m[k] = nm;
                             bulk_next_j[k] = nj;
                         }
