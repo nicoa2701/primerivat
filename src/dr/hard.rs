@@ -1660,11 +1660,59 @@ pub fn s2_hard_sieve_par(
         )
     };
 
+    let compute_split_tail_ext = || -> i128 {
+        let t_split = Instant::now();
+        let split_ext: i128 = (far_easy_start..n_easy)
+            .into_par_iter()
+            .map(|ei| {
+                let bi = n_hard + ei;
+                let b = bi + c + 1;
+                if b >= a || b < 2 {
+                    return 0i128;
+                }
+                let pb = primes[b - 1] as u128;
+                let pbm1 = primes[b - 2] as u128;
+                let pl_clamp_threshold = (x / (pb * pbm1)) as u64;
+                let nonclamp_cnt = primes[b..a]
+                    .partition_point(|&p| p <= pl_clamp_threshold);
+                let upper_cnt = if lo_start == 0 {
+                    a - b
+                } else {
+                    let pl_upper = (x / (pb * lo_start as u128)) as u64;
+                    primes[b..a].partition_point(|&p| p <= pl_upper)
+                };
+                let clamped = upper_cnt.saturating_sub(nonclamp_cnt) as i128;
+                let emit_cnt = nonclamp_cnt.min(upper_cnt);
+                let mut sum = clamped;
+                let b_minus_2 = (b as i128) - 2;
+                for &pl in &primes[b..b + emit_cnt] {
+                    let n = (x / (pb * pl as u128)) as u64;
+                    let pi_n = if n <= y {
+                        primes.partition_point(|&p| p <= n)
+                    } else {
+                        a + s2_primes.count_le(n)
+                    } as i128;
+                    sum += pi_n - b_minus_2;
+                }
+                sum
+            })
+            .sum();
+        if tail_ext_split_enabled {
+            eprintln!(
+                "[tail-ext-split] contribution={} elapsed={:.3}s",
+                split_ext,
+                t_split.elapsed().as_secs_f64(),
+            );
+        }
+        split_ext
+    };
+
     ck!("before par_iter (work_items)");
 
     // chunk_outputs: (band_id, chunk_lo, sweep), one per work item, in
     // work_items order (NOT processing order).
-    let chunk_outputs: Vec<(usize, u64, BandSweep)> = if !crate::parameters::no_workpool() {
+    let compute_chunk_outputs = || -> Vec<(usize, u64, BandSweep)> {
+        if !crate::parameters::no_workpool() {
         use std::sync::Mutex;
         use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -1699,13 +1747,22 @@ pub fn s2_hard_sieve_par(
                 (work_items[i].band_id, work_items[i].chunk_lo, sw)
             })
             .collect()
+        } else {
+            (0..n_items).into_par_iter()
+                .map(|i| {
+                    let sw = process_item(&work_items[i]);
+                    (work_items[i].band_id, work_items[i].chunk_lo, sw)
+                })
+                .collect()
+        }
+    };
+
+    let (chunk_outputs, split_tail_ext) = if tail_ext_split_enabled {
+        let (chunk_outputs, split_ext) =
+            rayon::join(|| compute_chunk_outputs(), || compute_split_tail_ext());
+        (chunk_outputs, Some(split_ext))
     } else {
-        (0..n_items).into_par_iter()
-            .map(|i| {
-                let sw = process_item(&work_items[i]);
-                (work_items[i].band_id, work_items[i].chunk_lo, sw)
-            })
-            .collect()
+        (compute_chunk_outputs(), None)
     };
 
     ck!("after  par_iter collected");
@@ -1883,58 +1940,6 @@ pub fn s2_hard_sieve_par(
         resolved.iter().map(|&(_, _, e)| e).sum::<i128>()
         + total_clamp_count as i128;
 
-    let compute_split_tail_ext = || -> i128 {
-        let t_split = Instant::now();
-        let split_ext: i128 = (far_easy_start..n_easy)
-            .into_par_iter()
-            .map(|ei| {
-                let bi = n_hard + ei;
-                let b = bi + c + 1;
-                if b >= a || b < 2 {
-                    return 0i128;
-                }
-                let pb = primes[b - 1] as u128;
-                let pbm1 = primes[b - 2] as u128;
-                let pl_clamp_threshold = (x / (pb * pbm1)) as u64;
-                let nonclamp_cnt = primes[b..a]
-                    .partition_point(|&p| p <= pl_clamp_threshold);
-                let upper_cnt = if lo_start == 0 {
-                    a - b
-                } else {
-                    let pl_upper = (x / (pb * lo_start as u128)) as u64;
-                    primes[b..a].partition_point(|&p| p <= pl_upper)
-                };
-                let clamped = upper_cnt.saturating_sub(nonclamp_cnt) as i128;
-                let emit_cnt = nonclamp_cnt.min(upper_cnt);
-                let mut sum = clamped;
-                let b_minus_2 = (b as i128) - 2;
-                for &pl in &primes[b..b + emit_cnt] {
-                    let n = (x / (pb * pl as u128)) as u64;
-                    let pi_n = if n <= y {
-                        primes.partition_point(|&p| p <= n)
-                    } else {
-                        a + s2_primes.count_le(n)
-                    } as i128;
-                    sum += pi_n - b_minus_2;
-                }
-                sum
-            })
-            .sum();
-        if tail_ext_split_enabled {
-            eprintln!(
-                "[tail-ext-split] contribution={} elapsed={:.3}s",
-                split_ext,
-                t_split.elapsed().as_secs_f64(),
-            );
-        }
-        split_ext
-    };
-
-    let split_tail_ext = if tail_ext_split_enabled {
-        Some(compute_split_tail_ext())
-    } else {
-        None
-    };
     let tail_ext_contribution =
         split_tail_ext.unwrap_or(fused_tail_ext_contribution);
     let s2_total = fused_s2_total - fused_tail_ext_contribution
