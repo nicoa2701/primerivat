@@ -473,6 +473,45 @@ fn run_dr_meissel4_profile(x: u128, _threads: usize) {
                  if imbalance > 0.0 { 100.0 / imbalance } else { 100.0 });
     }
 
+    if !profile.work_items.is_empty() {
+        let mut items: Vec<(usize, usize, u64, u64, u64, u64, u64, u64)> = profile
+            .work_items
+            .iter()
+            .map(|w| {
+                let total = w.fill_ns + w.bi_main_ns + w.rest_plain_ns + w.rest_bulk_ns
+                    + w.tail_prefix_ns + w.tail_ext_ns + w.tail_p2_ns + w.tail_advance_ns;
+                (
+                    w.item_i,
+                    w.band_t,
+                    w.chunk_lo,
+                    w.chunk_hi,
+                    total,
+                    w.tail_ext_ns,
+                    w.rest_bulk_ns,
+                    w.n_ext_emitted,
+                )
+            })
+            .collect();
+        items.sort_by(|a, b| b.4.cmp(&a.4));
+        let show = items.len().min(12);
+        println!("    ┌─ Work-item breakdown (top {} of {} by total CPU) ─", show, items.len());
+        println!("    │  {:>4}  {:>3}  {:>13} → {:<13}  {:>9}  {:>9}  {:>9}  {:>11}",
+                 "item", "t", "lo", "hi", "total ms", "tail_ext", "rest_bulk", "ext_emit");
+        for &(item, t, lo, hi, total, tail_ext, rest_bulk, ext_emit) in items.iter().take(show) {
+            println!("    │  {:>4}  {:>3}  {:>13} → {:<13}  {:>9.1}  {:>9.1}  {:>9.1}  {:>11}",
+                item,
+                t,
+                fmt_thousands(lo as u128),
+                fmt_thousands(hi as u128),
+                (total as f64) / 1e6,
+                (tail_ext as f64) / 1e6,
+                (rest_bulk as f64) / 1e6,
+                fmt_thousands(ext_emit as u128),
+            );
+        }
+        println!("    └─ enable with RIVAT3_WORK_ITEM_PROFILE=1");
+    }
+
     println!("  total              {}", fmt_elapsed(total));
     println!("  π({}) = {}", fmt_thousands(x), fmt_thousands(result));
 }

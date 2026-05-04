@@ -65,6 +65,9 @@ pub struct HardProfile {
     /// (band 0 = lowest n). Populated by [`s2_hard_sieve_par`] for
     /// load-balancing diagnostics. Empty `Vec` when not relevant.
     pub per_band: Vec<BandProfile>,
+    /// Per-work-item breakdown before sub-chunks are aggregated back into
+    /// bands. Populated only when `RIVAT3_WORK_ITEM_PROFILE=1`.
+    pub work_items: Vec<WorkItemProfile>,
 }
 
 #[derive(Default, Clone, Copy, Debug)]
@@ -96,6 +99,29 @@ pub struct BandProfile {
     pub band_lo: u64,
     /// First sieve segment past band (exclusive).
     pub band_hi: u64,
+    pub fill_ns: u64,
+    pub bi_main_ns: u64,
+    pub bi_main_leaf_ns: u64,
+    pub rest_plain_ns: u64,
+    pub rest_bulk_ns: u64,
+    pub tail_prefix_ns: u64,
+    pub tail_ext_ns: u64,
+    pub tail_p2_ns: u64,
+    pub tail_advance_ns: u64,
+    pub n_bi_leaf_hits: u64,
+    pub n_ext_emitted: u64,
+    pub n_prefix_fills: u64,
+    pub n_bulk_active_sum: u64,
+}
+
+/// Per-scheduler-item profile entry. Unlike [`BandProfile`], this preserves
+/// sub-band chunks before they are aggregated back into their parent band.
+#[derive(Default, Clone, Debug)]
+pub struct WorkItemProfile {
+    pub item_i: usize,
+    pub band_t: usize,
+    pub chunk_lo: u64,
+    pub chunk_hi: u64,
     pub fill_ns: u64,
     pub bi_main_ns: u64,
     pub bi_main_leaf_ns: u64,
@@ -628,6 +654,10 @@ pub fn s2_hard_sieve_par(
     // recompute strategy, etc.). `--bucket-bulk` / `RIVAT3_BUCKET_BULK=1`.
     let bucket_bulk = crate::parameters::bucket_bulk();
     let rest_bulk_profile = std::env::var("RIVAT3_REST_BULK_PROFILE")
+        .ok()
+        .map(|s| !s.is_empty() && s != "0" && s.to_lowercase() != "false")
+        .unwrap_or(false);
+    let work_item_profile = std::env::var("RIVAT3_WORK_ITEM_PROFILE")
         .ok()
         .map(|s| !s.is_empty() && s != "0" && s.to_lowercase() != "false")
         .unwrap_or(false);
@@ -1903,6 +1933,35 @@ pub fn s2_hard_sieve_par(
 
     ck!("after  par_iter collected");
 
+    let work_item_profiles: Vec<WorkItemProfile> = if work_item_profile {
+        chunk_outputs.iter().enumerate()
+            .map(|(i, (band_id, chunk_lo, sw))| {
+                let s = &sw.8;
+                WorkItemProfile {
+                    item_i: i,
+                    band_t: *band_id,
+                    chunk_lo: *chunk_lo,
+                    chunk_hi: work_items[i].chunk_hi,
+                    fill_ns: s.fill_ns,
+                    bi_main_ns: s.bi_main_ns,
+                    bi_main_leaf_ns: s.bi_main_leaf_ns,
+                    rest_plain_ns: s.rest_plain_ns,
+                    rest_bulk_ns: s.rest_bulk_ns,
+                    tail_prefix_ns: s.tail_prefix_ns,
+                    tail_ext_ns: s.tail_ext_ns,
+                    tail_p2_ns: s.tail_p2_ns,
+                    tail_advance_ns: s.tail_advance_ns,
+                    n_bi_leaf_hits: s.n_bi_leaf_hits,
+                    n_ext_emitted: s.n_ext_emitted,
+                    n_prefix_fills: s.n_prefix_fills,
+                    n_bulk_active_sum: s.n_bulk_active_sum,
+                }
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
     // Group chunks per band and sort each band's chunks by chunk_lo asc.
     let mut chunks_per_band: Vec<Vec<(u64, BandSweep)>> = (0..num_bands).map(|_| Vec::new()).collect();
     for (band_id, chunk_lo, sweep) in chunk_outputs {
@@ -2135,6 +2194,7 @@ pub fn s2_hard_sieve_par(
         n_prefix_fills:            agg.n_prefix_fills,
         n_bulk_active_primes_sum:  agg.n_bulk_active_sum,
         per_band,
+        work_items: work_item_profiles,
     };
     ck!("end of s2_hard_sieve_par");
     (s2_total, p2_total, profile)
