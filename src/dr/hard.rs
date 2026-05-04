@@ -631,6 +631,10 @@ pub fn s2_hard_sieve_par(
         .ok()
         .map(|s| !s.is_empty() && s != "0" && s.to_lowercase() != "false")
         .unwrap_or(false);
+    let tail_ext_split_enabled = std::env::var("RIVAT3_TAIL_EXT_SPLIT")
+        .ok()
+        .map(|s| !s.is_empty() && s != "0" && s.to_lowercase() != "false")
+        .unwrap_or(false);
 
     // Per-band easy iterator init, hoisted out of the per-band closure so the
     // pass-2 deferred-tail-ext replay can reuse it for heavy bands. Captures
@@ -1217,7 +1221,11 @@ pub fn s2_hard_sieve_par(
                 // the ext / p2 loop bodies.
 
                 let t_ext = Instant::now();
-                if band_is_heavy {
+                if tail_ext_split_enabled {
+                    // Split-tail mode computes the whole ext-easy contribution
+                    // after the sweep using `s2_primes.count_le(n)`, so the
+                    // in-sieve tail emission is intentionally skipped.
+                } else if band_is_heavy {
                     // 2-pass deferred path: capture (sieve.bits, p2_prefix,
                     // local_p2_offset, …) and skip the in-line ext-easy
                     // emission. Pass 2 will drain `deferred` once the light
@@ -1371,7 +1379,7 @@ pub fn s2_hard_sieve_par(
             // launching pass-2 here, work-stealing routes ei tasks to threads
             // that finished their light bands early, instead of all 8 threads
             // waiting on the slowest band before pass-2 starts.
-            if band_is_heavy && !deferred.is_empty() {
+            if !tail_ext_split_enabled && band_is_heavy && !deferred.is_empty() {
                 let (fp, fc, ne, ns) = (far_easy_start..n_easy)
                     .into_par_iter()
                     .map(|ei| {
@@ -1867,15 +1875,15 @@ pub fn s2_hard_sieve_par(
     let ns_resolve = t_resolve.elapsed().as_nanos() as u64;
 
     // s2_total = per-band folded sums + bulk clamp count (+1 each).
-    let s2_total: i128 =
+    let fused_s2_total: i128 =
         resolved.iter().map(|&(s, _, _)| s).sum::<i128>()
         + total_clamp_count as i128;
     let p2_total: u128 = resolved.iter().map(|&(_, p, _)| p).sum();
-    let tail_ext_contribution: i128 =
+    let fused_tail_ext_contribution: i128 =
         resolved.iter().map(|&(_, _, e)| e).sum::<i128>()
         + total_clamp_count as i128;
 
-    if std::env::var("RIVAT3_TAIL_EXT_SPLIT_CHECK").is_ok() {
+    let compute_split_tail_ext = || -> i128 {
         let t_split = Instant::now();
         let split_ext: i128 = (far_easy_start..n_easy)
             .into_par_iter()
@@ -1912,13 +1920,48 @@ pub fn s2_hard_sieve_par(
                 sum
             })
             .sum();
-        eprintln!(
-            "[tail-ext-split-check] fused={} split={} elapsed={:.3}s",
-            tail_ext_contribution,
-            split_ext,
-            t_split.elapsed().as_secs_f64(),
-        );
-        assert_eq!(split_ext, tail_ext_contribution, "tail_ext split mismatch");
+        if tail_ext_split_enabled {
+            eprintln!(
+                "[tail-ext-split] contribution={} elapsed={:.3}s",
+                split_ext,
+                t_split.elapsed().as_secs_f64(),
+            );
+        }
+        split_ext
+    };
+
+    let split_tail_ext = if tail_ext_split_enabled {
+        Some(compute_split_tail_ext())
+    } else {
+        None
+    };
+    let tail_ext_contribution =
+        split_tail_ext.unwrap_or(fused_tail_ext_contribution);
+    let s2_total = fused_s2_total - fused_tail_ext_contribution
+        + tail_ext_contribution;
+
+    if std::env::var("RIVAT3_TAIL_EXT_SPLIT_CHECK").is_ok() {
+        let t_split = Instant::now();
+        let split_ext = split_tail_ext.unwrap_or_else(compute_split_tail_ext);
+        if tail_ext_split_enabled {
+            eprintln!(
+                "[tail-ext-split-check] split={} fused=skipped elapsed={:.3}s",
+                split_ext,
+                t_split.elapsed().as_secs_f64(),
+            );
+        } else {
+            eprintln!(
+                "[tail-ext-split-check] fused={} split={} elapsed={:.3}s",
+                fused_tail_ext_contribution,
+                split_ext,
+                t_split.elapsed().as_secs_f64(),
+            );
+            assert_eq!(
+                split_ext,
+                fused_tail_ext_contribution,
+                "tail_ext split mismatch"
+            );
+        }
     }
 
     let profile = HardProfile {
