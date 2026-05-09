@@ -31,27 +31,25 @@ Build release, multi-thread, α adaptatif. Trois machines de référence :
 
 | x | i5-9300H | i5-13450HX | Ryzen 9700X | π(x) |
 |---|---:|---:|---:|---|
-| `1e11` | 9 ms | 9 ms | 4 ms | 4 118 054 813 |
-| `1e12` | 30 ms | 31 ms | 10 ms | 37 607 912 018 |
-| `1e13` | 117 ms | 56 ms | 42 ms | 346 065 536 839 |
-| `1e14` | 466 ms | 220 ms | 163 ms | 3 204 941 750 802 |
-| `1e15` | 1,85 s | 0,81 s | 0,62 s | 29 844 570 422 669 |
-| `1e16` | 8,74 s | 3,08 s | 2,29 s | 279 238 341 033 925 |
-| `1e17` | 42,1 s α=2 | 14,4 s α=1 | 10,6 s α=1 | 2 623 557 157 654 233 |
-| `3e17` | 135 s α=2 | 39,9 s α=1 | 20,3 s α=2 | 7 650 011 911 220 803 |
-| `1e18` | 313 s α=2 | 97,0 s α=1 | 49,2 s α=2 | 24 739 954 287 740 860 |
+| `1e11` | 9 ms | 5 ms | 2 ms | 4 118 054 813 |
+| `1e12` | 30 ms | 17 ms | 7 ms | 37 607 912 018 |
+| `1e13` | 117 ms | 34 ms | 23 ms | 346 065 536 839 |
+| `1e14` | 263 ms α=2 | 92 ms α=2 | 66 ms α=2 | 3 204 941 750 802 |
+| `1e15` | 1,15 s α=2 | 0,36 s α=2 | 0,26 s α=2 | 29 844 570 422 669 |
+| `1e16` | 5,99 s α=2 | 1,64 s α=2 | 1,22 s α=2 | 279 238 341 033 925 |
+| `1e17` | 35,5 s α=2 | 8,83 s α=2 | 6,63 s α=2 | 2 623 557 157 654 233 |
+| `1e18` | 287 s α=2 | 56,8 s α=2 | 41,4 s α=2 | 24 739 954 287 740 860 |
 
-Toutes les colonnes sont mesurées au commit `8a6d89b` (post-règle α
-2-tier), sweep batch single-trial `1e11 1e12 … 1e18`. Le 9300H thermal-
-throttle après ~10 s de charge soutenue, donc 1e17 ici (42,1 s α=2) est
-mid-throttle ; le snapshot cool single-run post-Étape-A à la même
-magnitude est de 38,9 s. 1e18 sur 9300H (313 s α=2) est lancé séparément
-(~5+ min) — résultat 36 % en dessous du snapshot pré-Phase-1+2A de 488 s
-et 75 % en dessous de la baseline `9e9162a` à 1266 s.
+Les trois colonnes proviennent de sweeps cool single-trial frais au
+commit `c3decb2` (post-cascade perf 2026-05 + règle α adaptative abaissée
+à `x ≥ 1e14` sur les trois tiers — auto α=2 dès 1e14 sur 9300HF, 13450HX
+et 9700X). 1e18 sur 9300H (287 s α=2) est lancé séparément (~5 min) —
+résultat 41 % en dessous du snapshot pré-Phase-1+2A de 488 s et 77 % en
+dessous de la baseline `9e9162a` à 1266 s.
 
-La colonne 9700X montre le nouveau régime α=2 qui se déclenche à partir
-de 3e17 (règle adaptative ci-dessous) : 20,3 s à 3e17 (vs ~26 s en α=1)
-et 49,2 s à 1e18 (vs ~72 s en α=1).
+La colonne 9700X confirme qu'α=2 gagne dès 1e14 post-cascade : 1e17 passe
+de 10,6 s α=1 (défaut pré-cascade) et des 17 s α=2 documentés à
+`8a6d89b` à 6,63 s α=2 à `c3decb2` ; et 1e18 passe de 49,2 s à 41,4 s.
 
 Gain cumulé vs la baseline pré-cascade au commit `9e9162a` sur les trois
 CPUs (les gains du cascade sont universels — Phase 1+2A, popcount LUT-
@@ -60,11 +58,9 @@ deferred-tail-ext pour le régime α=2) :
 
 | x | i5-9300H | i5-13450HX | Ryzen 9700X |
 |---|---:|---:|---:|
-| 1e15 | 5,51 → 1,85 s (**−66 %**) | — → 0,81 s | — → 0,62 s |
-| 1e17 α=2 | 160 → 42 s (**−74 %**) | — | — |
-| 1e17 α=1 | — | 44,8 → 14,4 s (**−68 %**) | — → 10,6 s |
-| 1e18 α=2 | 1266 → 313 s (**−75 %**) | — | — → 49,2 s |
-| 1e18 α=1 | — | 301 → 97 s (**−68 %**) | — |
+| 1e15 | 5,51 → 1,15 s α=2 (**−79 %**) | — → 0,36 s α=2 | — → 0,26 s α=2 |
+| 1e17 | 160 → 35,5 s α=2 (**−78 %**) | 44,8 (α=1) → 8,83 s α=2 (**−80 %**) | — → 6,63 s α=2 |
+| 1e18 | 1266 → 287 s α=2 (**−77 %**) | 301 (α=1) → 56,8 s α=2 (**−81 %**) | — → 41,4 s α=2 |
 
 Les gains cumulés viennent du cascade S2_hard multi-commits (single-pass
 deferred-leaf design, fold accumulators, band layout log-scale pour
@@ -106,22 +102,23 @@ La forme fermée `ext_easy` `φ(n, b−1) = π(n) − (b−2)` est valide lorsqu
 ### α adaptatif
 
 `y = α·∛x` avec α choisi selon l'ordre de grandeur de `x` **et le matériel**,
-en deux tiers hardware :
+en trois tiers hardware (qui partagent tous le même seuil `x ≥ 1e14` après
+la cascade perf 2026-05) :
 
 - **Tier 9300H** (L3 < 16 Mo **et** ≤ 8 cœurs physiques, ex. laptops
-  contraints par le cache) : α = 2,0 dès `x ≥ 3e16` (~41 % plus rapide
-  à `1e17`).
+  contraints par le cache) : α = 2,0 dès `x ≥ 1e14` (mesures −18 % à
+  1e14, −22 % à 1e15, −33 % à 1e16, −41 % à 1e17 sur i5-9300HF).
+- **Tier 13450HX / hybride P+E** (`logical < 2 × physical` **et** ≥ 8
+  cœurs physiques, ex. Intel Raptor Lake P+E où les E-cores n'ont pas
+  de SMT) : α = 2,0 dès `x ≥ 1e14` (mesure −22 % à 1e14 sur i5-13450HX).
 - **Tier 9700X** (≥ 8 cœurs physiques **et** SMT pur, c.-à-d.
   `logical == 2 × physical`, ex. Ryzen 7 9700X 8C/16T ou tout
-  Threadripper avec HT/SMT activé) : α = 2,0 dès `x ≥ 3e17` (~24 % plus
-  rapide à `1e18`, ~28 % plus rapide à `5e17`).
-- Tous les autres CPUs (ex. parts hybrides P+E Intel où `logical < 2 ×
-  physical`, ou tout `x` sous le seuil) : α = 1,0.
-
-Les deux seuils reflètent le fait que le tier desktop SMT-symétrique
-(16 threads logiques, gros L3) absorbe les fenêtres de crible plus
-larges d'α=1 jusqu'à ~1e17, après quoi les économies CPU algorithmiques
-d'α=2 (−42 % à 1e18) dominent l'équilibre Rayon légèrement moins bon.
+  Threadripper avec HT/SMT activé) : α = 2,0 dès `x ≥ 1e14` (mesure
+  −27 % à 1e14 sur Ryzen 7 9700X ; pré-cascade le seuil était 3e17 car
+  α=2 perdait à 1e17 sur ce tier).
+- Tous les autres CPUs (machines qui ne matchent aucun des trois tiers
+  ci-dessus) : α = 1,0 par défaut ; surcharger via `-a 2` si les
+  benchmarks montrent un gain α=2.
 
 La sélection automatique peut être surchargée depuis la CLI via `-a <α>` ou
 `--alpha <α>`. Plage acceptée :

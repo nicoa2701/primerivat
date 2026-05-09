@@ -220,16 +220,20 @@ Plus $\alpha$ grand, plus $y$ grand :
   fenêtre augmente, et allocation seed_primes plus grande.
 - **Plus de leaves ext_easy** : la zone $(x^{1/4}, y]$ s'élargit.
 
-Le compromis optimal dépend de $x$. Mesures sur i5-9300H :
+Le compromis optimal dépend de $x$. Mesures sur i5-9300HF (post-cascade
+perf 2026-05) :
 
 | $x$ | Meilleur $\alpha$ |
 |-----|-------------------|
-| $\le 10^{15}$ | $\alpha = 1$ (overhead seed_primes dominerait avec $\alpha = 2$) |
-| $10^{16}$     | $\approx$ égalité |
+| $\le 10^{13}$ | $\alpha = 1$ (le fallback Lucy domine ; α a un impact marginal) |
+| $10^{14}$     | $\alpha = 2$ (gain $\approx 18\%$) |
+| $10^{15}$     | $\alpha = 2$ (gain $\approx 22\%$) |
+| $10^{16}$     | $\alpha = 2$ (gain $\approx 33\%$) |
 | $\ge 10^{17}$ | $\alpha = 2$ (gain $\approx 41\%$) |
 
-D'où le choix **adaptatif** : $\alpha = 1$ si $x < 3 \cdot 10^{16}$,
-sinon $\alpha = 2$.
+D'où le choix **adaptatif** : $\alpha = 1$ si $x < 10^{14}$, sinon
+$\alpha = 2$ (sur les trois tiers CPU reconnus — voir parameters.rs
+`choose_alpha`).
 
 **Attention :** $\alpha = 1.25$ donne des résultats **faux** à certains $x$
 (observé à $9.93 \cdot 10^{15}$, $9.95 \cdot 10^{15}$, $10^{16}$). Bug non
@@ -241,7 +245,7 @@ compris à ce jour — n'utiliser que $\alpha \in \{1, 2\}$.
 
 ```
 fn prime_pi(x):
-    alpha <- 1.0 si x < 3e16 sinon 2.0
+    alpha <- 1.0 si x < 1e14 sinon 2.0
     y <- alpha * cbrt(x)
     z <- x / y
     seed_primes <- primes jusqu'a y                      # crible Lucy

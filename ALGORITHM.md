@@ -221,16 +221,20 @@ Larger $\alpha$ means larger $y$:
   increases, and the seed_primes allocation is larger.
 - **More ext_easy leaves**: the range $(x^{1/4}, y]$ widens.
 
-The optimal trade-off depends on $x$. Measurements on i5-9300H:
+The optimal trade-off depends on $x$. Measurements on i5-9300HF (post the
+2026-05 perf cascade):
 
 | $x$           | Best $\alpha$                                                     |
 |---------------|--------------------------------------------------------------------|
-| $\le 10^{15}$ | $\alpha = 1$ (seed_primes overhead would dominate with $\alpha = 2$) |
-| $10^{16}$     | roughly break-even                                                 |
+| $\le 10^{13}$ | $\alpha = 1$ (Lucy fallback dominates; α has marginal impact)     |
+| $10^{14}$     | $\alpha = 2$ (gain $\approx 18\%$)                                 |
+| $10^{15}$     | $\alpha = 2$ (gain $\approx 22\%$)                                 |
+| $10^{16}$     | $\alpha = 2$ (gain $\approx 33\%$)                                 |
 | $\ge 10^{17}$ | $\alpha = 2$ (gain $\approx 41\%$)                                 |
 
-Hence the **adaptive choice**: $\alpha = 1$ if $x < 3 \cdot 10^{16}$,
-otherwise $\alpha = 2$.
+Hence the **adaptive choice**: $\alpha = 1$ if $x < 10^{14}$,
+otherwise $\alpha = 2$ (on the three recognized CPU tiers — see
+parameters.rs `choose_alpha`).
 
 **Warning:** $\alpha = 1.25$ yields **wrong** results at some $x$ (observed
 at $9.93 \cdot 10^{15}$, $9.95 \cdot 10^{15}$, $10^{16}$). Root cause not
@@ -242,7 +246,7 @@ understood — use only $\alpha \in \{1, 2\}$.
 
 ```
 fn prime_pi(x):
-    alpha <- 1.0 if x < 3e16 else 2.0
+    alpha <- 1.0 if x < 1e14 else 2.0
     y <- alpha * cbrt(x)
     z <- x / y
     seed_primes <- primes up to y                       # Lucy sieve
